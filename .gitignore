@@ -1,0 +1,56 @@
+# ============================================
+# Local-only files (NEVER commit)
+# ============================================
+
+# Customer-specific documents
+Custmer_Context.md
+SPEC.md
+GAP_TRACKER.md
+CLAUDE.md
+PRODUCTIZATION_PLAN.md
+
+# Session helpers and account-specific files
+snowpark_session.py
+test_results_APEX_BROKER_AGENT/
+
+# Original customer-named files (de-identified copies go in repo)
+apex_nextload_demo.ipynb
+apex_broker_360_semantic_view.yaml
+apex_architecture.md
+register_model.py
+
+# ============================================
+# Python
+# ============================================
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ============================================
+# Anaconda
+# ============================================
+anaconda_projects/
+
+# ============================================
+# OS
+# ============================================
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ============================================
+# IDE
+# ============================================
+.vscode/
+.idea/
+*.code-workspace
+
+# ============================================
+# Snowflake
+# ============================================
+*.connection.toml
