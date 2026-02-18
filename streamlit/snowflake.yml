@@ -1,0 +1,18 @@
+definition_version: 2
+entities:
+  loadstar_commander:
+    type: streamlit
+    identifier:
+      name: LOADSTAR_COMMANDER
+      database: APEX_CAPITAL_DEMO
+      schema: ANALYTICS
+    query_warehouse: APEX_ANALYTICS_WH
+    compute_pool: LOADSTAR_COMPUTE_POOL
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    external_access_integrations:
+      - PYPI_ACCESS_INTEGRATION
+    main_file: streamlit_app.py
+    artifacts:
+      - streamlit_app.py
+      - pyproject.toml
+      - .streamlit/config.toml
