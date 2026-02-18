@@ -4,7 +4,7 @@
 
 # Customer-specific documents
 Custmer_Context.md
-SPEC.md
+/SPEC.md
 GAP_TRACKER.md
 CLAUDE.md
 PRODUCTIZATION_PLAN.md
@@ -54,3 +54,8 @@ Thumbs.db
 # Snowflake
 # ============================================
 *.connection.toml
+
+# ============================================
+# Snowflake CLI deploy artifacts
+# ============================================
+**/output/
