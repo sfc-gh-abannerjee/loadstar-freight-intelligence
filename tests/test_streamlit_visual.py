@@ -31,8 +31,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 BASELINES_DIR = Path(__file__).resolve().parent / "visual_baselines"
 
-SNOWSIGHT_ORG = os.environ.get("SNOWFLAKE_ORG", "SFSENORTHAMERICA")
-SNOWSIGHT_ACCOUNT = os.environ.get("SNOWFLAKE_ACCOUNT", "ABANNERJEE_AWS1")
+SNOWSIGHT_ORG = os.environ.get("SNOWFLAKE_ORG", "sfsenorthamerica")
+SNOWSIGHT_ACCOUNT = os.environ.get("SNOWFLAKE_ACCOUNT", "abannerjee_aws1")
 SNOWSIGHT_LOGIN_URL = (
     f"https://app.snowflake.com/{SNOWSIGHT_ORG}/{SNOWSIGHT_ACCOUNT}"
 )
