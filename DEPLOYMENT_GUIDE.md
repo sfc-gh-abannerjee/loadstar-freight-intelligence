@@ -58,7 +58,7 @@ This uploads the demo notebook with GPU Container Runtime.
 
 ```bash
 pip install snowflake-ml-python torch
-python scripts/register_model.py
+python register_model.py
 ```
 
 This trains a PyTorch `BrokerRiskNet` model and registers it in the Snowflake Model Registry.

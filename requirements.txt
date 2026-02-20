@@ -1,0 +1,14 @@
+# LoadStar Python Dependencies (for register_model.py, snowpark_session.py)
+# Streamlit dependencies are in streamlit/pyproject.toml
+
+# Snowflake
+snowflake-snowpark-python>=1.11.0
+snowflake-ml-python>=1.5.0
+
+# ML / Data
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Auth (optional, for private key auth)
+cryptography>=41.0.0

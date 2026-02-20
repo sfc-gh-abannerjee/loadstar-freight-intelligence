@@ -3,13 +3,14 @@ LoadStar Commander — Freight intelligence dashboard.
 Runs on Snowflake Container Runtime (SPCS).
 """
 
-import streamlit as st
-import pydeck as pdk
-import plotly.graph_objects as go
-import pandas as pd
-import json
 import os
+
+import pandas as pd
+import plotly.graph_objects as go
+import pydeck as pdk
 import requests
+
+import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Page config

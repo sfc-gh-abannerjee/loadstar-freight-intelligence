@@ -13,7 +13,7 @@ CONFIG="$PROJECT_DIR/config/demo_config.env"
 # Load configuration
 if [ ! -f "$CONFIG" ]; then
     echo "ERROR: Config file not found at $CONFIG"
-    echo "Copy config/demo_config.env.example to config/demo_config.env and edit."
+    echo "Create config/demo_config.env with your environment settings before deploying."
     exit 1
 fi
 source "$CONFIG"
@@ -78,6 +78,6 @@ echo "==========================================="
 echo ""
 echo "Next steps:"
 echo "  1. Upload notebook:  ./scripts/upload_notebook.sh"
-echo "  2. Register model:   python scripts/register_model.py"
+echo "  2. Register model:   python register_model.py"
 echo "  3. Validate:         ./scripts/validate_deployment.sh"
 echo "  4. Open Snowsight and navigate to $DATABASE.ANALYTICS"

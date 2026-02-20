@@ -72,6 +72,9 @@ loadstar-freight-intelligence/
 ├── README.md                          # This file
 ├── DEPLOYMENT_GUIDE.md                # Detailed setup instructions
 ├── ARCHITECTURE.md                    # Technical architecture reference
+├── register_model.py                  # Train BrokerRiskNet + register in Model Registry
+├── snowpark_session.py                # Snowpark session factory (multi-auth)
+├── requirements.txt                   # Python dependencies
 ├── config/
 │   └── demo_config.env                # Parameterized configuration
 ├── sql/

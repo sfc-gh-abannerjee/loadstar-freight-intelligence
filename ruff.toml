@@ -1,0 +1,16 @@
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "S",   # flake8-bandit (security)
+    "B",   # flake8-bugbear
+    "I",   # isort
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["S101"]  # Allow assert in tests
+"streamlit/*" = ["E501"]  # HTML templates need longer lines
