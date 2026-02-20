@@ -1,8 +1,8 @@
 {
-  "version": 3,
+  "version": 4,
   "iteration": 16,
-  "max_iterations": 20,
-  "status": "converged",
+  "max_iterations": 25,
+  "status": "running",
   "convergence_criteria": {
     "critical_findings": 0,
     "warning_findings": 0,
@@ -98,6 +98,33 @@
       "critical": 0,
       "warnings": 0,
       "description": "Ruff lint + container runtime + SQL injection scan + config validation on streamlit/"
+    },
+    "streamlit_apptest": {
+      "passes": false,
+      "last_run": null,
+      "agent": "streamlit-tester",
+      "findings": 0,
+      "critical": 0,
+      "warnings": 0,
+      "description": "Headless functional tests via AppTest: app renders, tabs exist, selectboxes work, no exceptions"
+    },
+    "streamlit_visual": {
+      "passes": false,
+      "last_run": null,
+      "agent": "streamlit-tester",
+      "findings": 0,
+      "critical": 0,
+      "warnings": 0,
+      "description": "Playwright visual regression: screenshot tabs against baselines, check DOM structure, detect error banners"
+    },
+    "streamlit_css_theme": {
+      "passes": false,
+      "last_run": null,
+      "agent": "streamlit-tester",
+      "findings": 0,
+      "critical": 0,
+      "warnings": 0,
+      "description": "CSS/theme consistency: unreferenced CSS vars, config.toml color alignment, font imports, orphaned classes"
     },
     "doc_accuracy": {
       "passes": true,

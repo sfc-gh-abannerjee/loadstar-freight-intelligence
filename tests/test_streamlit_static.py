@@ -24,6 +24,8 @@ class TestStreamlitStatic:
             [sys.executable, "-m", "ruff", "check", app_path, "--select", "E,F"],
             capture_output=True, text=True
         )
+        if "No module named ruff" in result.stderr:
+            pytest.skip("ruff is not installed")
         assert result.returncode == 0, f"Ruff found errors:\n{result.stdout}"
 
     def test_ruff_no_security_issues(self, project_root):
@@ -35,6 +37,8 @@ class TestStreamlitStatic:
             [sys.executable, "-m", "ruff", "check", app_path, "--select", "S"],
             capture_output=True, text=True
         )
+        if "No module named ruff" in result.stderr:
+            pytest.skip("ruff is not installed")
         if result.returncode != 0:
             pytest.fail(f"Ruff found security issues:\n{result.stdout}")
 

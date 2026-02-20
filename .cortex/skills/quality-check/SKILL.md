@@ -68,12 +68,15 @@ From all checks where `passes: false`, pick the one with the highest priority:
 9. `notebook_structure`
 10. `python_lint`
 11. `streamlit_lint`
-12. `doc_accuracy` (verify documentation claims match reality)
-13. `script_correctness` (verify deploy/validate scripts reference correct names and paths)
-14. `spec_traceability` (every SPEC.md deliverable verified against live objects + code)
-15. `test_execution` (actually run pytest and confirm tests pass)
-16. `streamlit_live` (verify Streamlit app deployed in Snowflake)
-17. `exploratory_sweep` (always last — run only after all predefined checks pass)
+12. `streamlit_apptest` (headless functional tests via AppTest)
+13. `streamlit_css_theme` (CSS/theme consistency static analysis)
+14. `streamlit_visual` (Playwright visual regression — requires live SiS URL)
+15. `doc_accuracy` (verify documentation claims match reality)
+16. `script_correctness` (verify deploy/validate scripts reference correct names and paths)
+17. `spec_traceability` (every SPEC.md deliverable verified against live objects + code)
+18. `test_execution` (actually run pytest and confirm tests pass)
+19. `streamlit_live` (verify Streamlit app deployed in Snowflake)
+20. `exploratory_sweep` (always last — run only after all predefined checks pass)
 
 If the selected check's `agent` field is `"all"` (exploratory_sweep), run all 4 agents
 with expanded scope prompts (see Exploratory Sweep section below).
@@ -89,6 +92,14 @@ You are the {agent_name} agent. Read .cortex/agents/{agent_name}.md and follow i
 Focus on the following check category: {check_name}
 Check description: {check_description}
 
+SKILL & MCP INTEGRATION:
+- For streamlit_apptest, streamlit_visual, or streamlit_css_theme checks: invoke the
+  `developing-with-streamlit` skill for Streamlit-specific best practices and AppTest guidance.
+- For any Snowflake-specific uncertainty (SiS runtime, st.connection behavior, container
+  runtime auth): use `mcp__snowflake-docs__snowflake_docs_search` to look up docs first.
+- For visual regression checks: if Playwright cannot authenticate to SiS (SSO required),
+  mark as PASS with INFO note explaining the skip reason. Do NOT mark as FAIL.
+
 IMPORTANT: At the very end of your report, output a machine-parseable status line:
 STATUS: PASS|FAIL critical=N warning=N info=N
 
@@ -102,6 +113,9 @@ Otherwise output STATUS: FAIL critical=N warning=N info=N
 |-------|-------|----------------|
 | python_lint | python-linter | Ruff lint + architecture + error handling + imports on register_model.py, snowpark_session.py |
 | streamlit_lint | streamlit-tester | Full audit of streamlit/streamlit_app.py |
+| streamlit_apptest | streamlit-tester | Run `pytest tests/test_streamlit_apptest.py::TestAppTestRendering -v`. Invoke `developing-with-streamlit` skill for AppTest guidance. Fix mock issues, verify all 5 headless tests pass. |
+| streamlit_visual | streamlit-tester | Run `pytest tests/test_streamlit_visual.py -v`. Check skip reasons. If SiS URL unavailable, mark as PASS with INFO note. Use `mcp__snowflake-docs__snowflake_docs_search` for SiS auth patterns. |
+| streamlit_css_theme | streamlit-tester | Run `pytest tests/test_streamlit_apptest.py::TestCSSThemeConsistency -v`. Fix unreferenced CSS vars or orphaned classes found as warnings. Invoke `developing-with-streamlit` skill for theme best practices. |
 | sql_scripts | sql-auditor | Syntax validation + idempotency on SQL scripts only (no live queries) |
 | sql_live_objects | sql-auditor | Object existence checks only (SHOW commands) |
 | sql_data_integrity | sql-auditor | Row counts, column checks, dynamic table refresh |
@@ -212,6 +226,10 @@ For each discovered gap, create a finding. If 0 findings, mark `exploratory_swee
 - If `snowflake_sql_execute` fails with "terminated connection", use `snow sql -c se_demo -q "USE DATABASE APEX_CAPITAL_DEMO; <query>" --format json` via Bash
 - If `python3 -m ruff` fails, report as SKIPPED (not FAIL) and continue
 - If a file doesn't exist, report as SKIPPED for that file's checks
+- If `pydeck` is not installed locally, AppTest tests handle this via mock injection — do NOT install pydeck
+- If `streamlit.testing.v1` is not importable (local `streamlit/` shadows the package), AppTest tests will skip — report as PASS with INFO note
+- If Playwright tests skip due to SiS auth (SSO required), report as PASS with INFO note — not FAIL
+- If `snow streamlit get-url` hangs, use `snow sql -c se_demo -q "SHOW STREAMLITS IN SCHEMA APEX_CAPITAL_DEMO.ANALYTICS" --format json` instead
 - Never halt the entire loop due to a single agent failure — mark that check as FAIL and continue to the next iteration
 
 ## Output

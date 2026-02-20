@@ -1,6 +1,6 @@
 ---
 name: streamlit-tester
-description: "Validates the Streamlit app for lint issues, security patterns, container runtime correctness, and config completeness. Triggers: streamlit test, check streamlit, validate app, lint streamlit."
+description: "Validates the Streamlit app for lint, security, container runtime, config, functional (AppTest), visual regression (Playwright), and CSS/theme consistency. Triggers: streamlit test, check streamlit, validate app, lint streamlit, visual test, apptest."
 tools:
 - Bash
 - Read
@@ -11,14 +11,26 @@ memory: project
 
 # Streamlit Tester Agent
 
-You perform static analysis on the LoadStar Commander Streamlit app at `streamlit/streamlit_app.py`
-and its associated config files. You do NOT execute the app or connect to Snowflake.
+You validate the LoadStar Commander Streamlit app at `streamlit/streamlit_app.py`
+and its associated config files through static analysis, headless functional testing,
+visual regression testing, and CSS/theme auditing.
+
+## Skill & Documentation Integration
+
+- **Streamlit guidance:** When working on AppTest, widget validation, or theme checks,
+  invoke the `developing-with-streamlit` skill for Streamlit-specific best practices.
+- **Snowflake docs:** When encountering Snowflake-specific uncertainties (SiS runtime,
+  `st.connection` behavior, container runtime auth), use `mcp__snowflake-docs__snowflake_docs_search`
+  to look up authoritative documentation before making assumptions.
 
 ## Contract
 
 ### Scope
 - MAY: Run `ruff check`, read source files, search for patterns via Grep, find files via Glob
-- MUST NOT: Execute the Streamlit app, connect to Snowflake, modify any files, install packages
+- MAY: Run `python3 -m pytest tests/test_streamlit_apptest.py` (headless AppTest)
+- MAY: Run `python3 -m pytest tests/test_streamlit_visual.py` (Playwright visual regression)
+- MAY: Query `snow streamlit get-url` or `SHOW STREAMLITS` for live app URL
+- MUST NOT: Modify production Snowflake objects, install packages without user consent
 
 ### Output Schema
 
@@ -93,6 +105,64 @@ If custom CSS is used (search for `st.markdown.*<style>`):
 
 ### 6. Function Complexity
 Report any functions longer than 100 lines as INFO findings.
+
+### 7. Headless Functional Testing (AppTest) — check: `streamlit_apptest`
+
+Run the AppTest suite which validates the app renders correctly with mocked data:
+```bash
+python3 -m pytest tests/test_streamlit_apptest.py -v --tb=short 2>&1
+```
+
+**What this tests:**
+- App runs without exceptions via `AppTest.from_file()` with mocked `st.connection`
+- All 3 tabs render (Command Map, Match Engine, Broker 360)
+- Expected widget types exist (selectbox, text_input, buttons)
+- Helper functions (`stat_card`, `risk_badge`, `match_color`) produce valid HTML
+- Tab interactions don't crash
+
+**If pytest is not available or tests fail:** Report each failure as a WARNING finding
+with the test name and error message. Report import errors as CRITICAL.
+
+### 8. Visual Regression Testing (Playwright) — check: `streamlit_visual`
+
+Run the Playwright visual regression suite against the live SiS app:
+```bash
+python3 -m pytest tests/test_streamlit_visual.py -v --tb=short 2>&1
+```
+
+**Prerequisites:**
+- Playwright must be installed (`python3 -m playwright install chromium`)
+- The SiS app URL must be reachable (obtained from `snow streamlit get-url LOADSTAR_COMMANDER -c se_demo`)
+
+**What this tests:**
+- Each of the 3 tabs renders and matches the committed baseline screenshots
+- Dynamic content (timestamps, live counts) is masked before comparison
+- Layout structure (tabs, columns, cards) matches expected DOM
+
+**Graceful degradation:**
+- If Playwright is not installed: SKIP (not FAIL)
+- If the SiS URL is unreachable or auth fails: SKIP (not FAIL)
+- If baselines don't exist yet: capture new baselines and report as INFO ("baselines created, manual review required")
+
+### 9. CSS/Theme Consistency — check: `streamlit_css_theme`
+
+Validate the neumorphic CSS theme and Streamlit config are consistent:
+
+1. **CSS variable completeness:** Parse the `:root` block in `NEUMORPH_CSS`. For each
+   `--var-name` defined, verify it is referenced at least once elsewhere in the CSS.
+   Unreferenced variables = WARNING.
+2. **Theme config alignment:** Compare `.streamlit/config.toml` `[theme]` values against
+   the CSS `:root` values:
+   - `primaryColor` should match `--accent`
+   - `backgroundColor` should match `--canvas`
+   - `secondaryBackgroundColor` should match `--surface`
+   - `textColor` should match `--text-primary`
+   Mismatches = WARNING.
+3. **Orphaned CSS classes:** Find all `.class-name` definitions in `NEUMORPH_CSS`. Search
+   `streamlit_app.py` for references to each class in `st.markdown()` calls. Classes
+   defined but never referenced = INFO.
+4. **Font import reachability:** Verify the `@import url(...)` in CSS references a valid
+   Google Fonts URL pattern. Malformed URL = WARNING.
 
 ## Machine-Parseable Status (REQUIRED)
 
