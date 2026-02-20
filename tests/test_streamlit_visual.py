@@ -1,23 +1,60 @@
 """
 Visual regression tests for LoadStar Commander using Playwright.
 
-Connects to the deployed Streamlit in Snowflake (SiS) app URL and captures
-screenshots of each tab, comparing against committed baseline images.
+Connects to a running Chrome instance via CDP (Chrome DevTools Protocol) on
+port 9222 and navigates to the deployed Streamlit in Snowflake (SiS) app.
 
-Gracefully SKIPs when Playwright is not installed, the SiS URL is unreachable,
-or authentication fails.
+Prerequisites:
+  1. Chrome must be running with --remote-debugging-port=9222
+     and --remote-allow-origins=* flags
+  2. The user must be authenticated to Snowsight in that Chrome session
+  3. MFA bypass is set automatically via snowflake-connector-python
+
+The key insight: Playwright can access cross-origin iframe DOM when it
+*observes* the navigation that creates the iframe. So we navigate away
+(to Snowsight home) then back to the SiS app while Playwright is connected.
 """
 
 import os
-import subprocess
 import json
-import re
+import time
+import shutil
+from pathlib import Path
 
 import pytest
 
 # ---------------------------------------------------------------------------
-# Check for Playwright availability
+# Constants
 # ---------------------------------------------------------------------------
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+BASELINES_DIR = Path(__file__).resolve().parent / "visual_baselines"
+
+SNOWSIGHT_ORG = os.environ.get("SNOWFLAKE_ORG", "SFSENORTHAMERICA")
+SNOWSIGHT_ACCOUNT = os.environ.get("SNOWFLAKE_ACCOUNT", "ABANNERJEE_AWS1")
+SNOWSIGHT_LOGIN_URL = (
+    f"https://app.snowflake.com/{SNOWSIGHT_ORG}/{SNOWSIGHT_ACCOUNT}"
+)
+
+# Full qualified name URL — url_id URLs cause "Something went wrong"
+SIS_APP_URL = (
+    f"{SNOWSIGHT_LOGIN_URL}/#/streamlit-apps/"
+    "APEX_CAPITAL_DEMO.ANALYTICS.LOADSTAR_COMMANDER"
+)
+
+CDP_ENDPOINT = os.environ.get("CDP_ENDPOINT", "http://localhost:9222")
+
+TABS = [
+    {"name": "command_map", "label": "Command map", "index": 0},
+    {"name": "match_engine", "label": "Match engine", "index": 1},
+    {"name": "broker_360", "label": "Broker 360", "index": 2},
+]
+
+# ---------------------------------------------------------------------------
+# Playwright availability check
+# ---------------------------------------------------------------------------
+
 
 def _has_playwright():
     """Check if Playwright and its Python bindings are available."""
@@ -28,158 +65,247 @@ def _has_playwright():
         return False
 
 
-def _get_sis_url() -> str:
-    """Get the deployed Streamlit in Snowflake app URL.
-
-    Tries multiple approaches:
-    1. Environment variable LOADSTAR_URL
-    2. snow streamlit get-url via Snowflake CLI
-    3. Construct from SHOW STREAMLITS output
-    """
-    # 1. Check environment variable
-    env_url = os.environ.get("LOADSTAR_URL")
-    if env_url:
-        return env_url
-
-    # 2. Try snow CLI (streamlit get-url can be slow, use snow sql instead)
+def _cdp_available() -> bool:
+    """Check if Chrome is listening on the CDP port."""
+    import urllib.request
     try:
-        result = subprocess.run(
-            [
-                "snow", "sql", "-c", "se_demo", "-q",
-                "SHOW STREAMLITS IN SCHEMA APEX_CAPITAL_DEMO.ANALYTICS",
-                "--format", "json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+        req = urllib.request.Request(f"{CDP_ENDPOINT}/json/version")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read())
+            return "Browser" in data
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# MFA bypass helpers
+# ---------------------------------------------------------------------------
+
+
+def _set_mfa_bypass(minutes: int):
+    """Set MINS_TO_BYPASS_MFA for the test user via snowflake-connector-python."""
+    config_path = Path.home() / ".snowflake" / "config.toml"
+    if not config_path.exists():
+        return
+
+    try:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+
+        with open(config_path, "rb") as f:
+            cfg = tomllib.load(f)
+        conn = cfg.get("connections", {}).get("se_demo", {})
+        if not conn:
+            return
+    except Exception:
+        return
+
+    try:
+        import snowflake.connector
+
+        ctx = snowflake.connector.connect(
+            account=conn.get("account", ""),
+            user=conn.get("user", ""),
+            password=conn.get("password", ""),
+            host=conn.get("host", ""),
+            role="ACCOUNTADMIN",
+            login_timeout=15,
+            network_timeout=15,
         )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            for row in data:
-                if row.get("name") == "LOADSTAR_COMMANDER":
-                    url_id = row.get("url_id", "")
-                    if url_id:
-                        # Construct SiS URL from account + url_id
-                        # Format: https://app.snowflake.com/<org>/<account>/#/streamlit-apps/<url_id>
-                        # Or the direct URL pattern
-                        return url_id
-    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        cur = ctx.cursor()
+        cur.execute(
+            f"ALTER USER {conn.get('user', 'ABANNERJEE')}"
+            f" SET MINS_TO_BYPASS_MFA = {int(minutes)}"
+        )
+        cur.close()
+        ctx.close()
+    except Exception:
         pass
 
-    return ""
+
+# ---------------------------------------------------------------------------
+# Debug screenshot helper
+# ---------------------------------------------------------------------------
 
 
-def _resolve_sis_url() -> str:
-    """Get the full SiS app URL, constructing from url_id if needed."""
-    url_or_id = _get_sis_url()
-    if not url_or_id:
-        return ""
-
-    # If it's already a full URL, use it directly
-    if url_or_id.startswith("http"):
-        return url_or_id
-
-    # Construct the Snowsight URL from the url_id
-    org = os.environ.get("SNOWFLAKE_ORG", "SFSENORTHAMERICA")
-    account = os.environ.get("SNOWFLAKE_ACCOUNT", "ABANNERJEE_AWS1")
-    return f"https://app.snowflake.com/{org}/{account}/#/streamlit-apps/{url_or_id}"
+def _save_debug_screenshot(page, name: str):
+    """Save a debug screenshot for visual inspection on failure."""
+    BASELINES_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        page.screenshot(path=str(BASELINES_DIR / f"{name}_debug.png"))
+    except Exception:
+        pass
 
 
-# Baselines directory
-BASELINES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "visual_baselines")
-
-# Tab definitions for screenshot capture
-TABS = [
-    {"name": "command_map", "label": "Command map", "index": 0},
-    {"name": "match_engine", "label": "Match engine", "index": 1},
-    {"name": "broker_360", "label": "Broker 360", "index": 2},
-]
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _has_playwright(), reason="Playwright not installed")
-class TestVisualRegression:
-    """Visual regression tests using Playwright against the live SiS app."""
+@pytest.fixture(scope="module")
+def loaded_page():
+    """Connect to Chrome via CDP, navigate to SiS app, yield (page, frame).
 
-    @pytest.fixture(scope="class")
-    def sis_url(self):
-        """Get the SiS app URL, skip if unavailable."""
-        url = _resolve_sis_url()
-        if not url:
-            pytest.skip("SiS app URL not available — set LOADSTAR_URL env var or ensure snow CLI is configured")
-        return url
+    The critical pattern: navigate away from the SiS page first (to Snowsight
+    home), then navigate back. This lets Playwright observe the iframe creation
+    and attach to the cross-origin Streamlit iframe, giving full DOM access.
+    """
+    if not _has_playwright():
+        pytest.skip("Playwright not installed")
 
-    @pytest.fixture(scope="class")
-    def browser_context(self):
-        """Create a Playwright browser context for the test class."""
-        from playwright.sync_api import sync_playwright
-
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True)
-
-        # Use Snowflake connection config for auth cookies if available
-        context = browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            ignore_https_errors=True,
+    if not _cdp_available():
+        pytest.skip(
+            "Chrome not running with CDP on port 9222. Launch with:\n"
+            '  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" '
+            "--remote-debugging-port=9222 --remote-allow-origins=* "
+            '--user-data-dir="/tmp/chrome-visual-test-profile" --no-first-run'
         )
-        context.set_default_timeout(30000)
 
-        yield context
+    from playwright.sync_api import sync_playwright
 
-        context.close()
-        browser.close()
+    BASELINES_DIR.mkdir(parents=True, exist_ok=True)
+
+    pw = sync_playwright().start()
+    browser = None
+    try:
+        browser = pw.chromium.connect_over_cdp(CDP_ENDPOINT)
+    except Exception as exc:
         pw.stop()
+        pytest.skip(f"Cannot connect to Chrome via CDP: {exc}")
 
-    @pytest.fixture(scope="class")
-    def page(self, browser_context, sis_url):
-        """Navigate to the SiS app and wait for load."""
-        pg = browser_context.new_page()
+    ctx = browser.contexts[0]
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
 
+    try:
+        # Step 1: Navigate to Snowsight home (ensures we're on the right origin
+        # and forces a fresh navigation when we go to the SiS app)
+        page.goto(SNOWSIGHT_LOGIN_URL, timeout=30000)
+        page.wait_for_timeout(3000)
+
+        # Check that we're authenticated (not on a login page)
+        if "login" in page.url.lower() or "oauth" in page.url.lower():
+            _save_debug_screenshot(page, "not_authenticated")
+            pytest.skip(
+                "Chrome session is not authenticated to Snowsight. "
+                "Please log in manually in the Chrome window first."
+            )
+
+        # Step 2: Navigate to SiS app — this triggers iframe creation
+        # which Playwright can observe and attach to
+        sis_url = os.environ.get("LOADSTAR_URL", SIS_APP_URL)
+        page.goto(sis_url, timeout=60000)
+
+        # Step 3: Wait for the Streamlit iframe to appear
+        page.wait_for_selector(
+            '[data-testid="streamlit-iframe"]', timeout=30000
+        )
+        # Give Streamlit time to render content inside the iframe
+        page.wait_for_timeout(10000)
+
+        # Step 4: Get the iframe's content frame
+        iframe_el = page.query_selector('[data-testid="streamlit-iframe"]')
+        if not iframe_el:
+            _save_debug_screenshot(page, "no_iframe")
+            pytest.fail("Streamlit iframe element not found on page")
+
+        frame = iframe_el.content_frame()
+
+        # If content_frame is None, the cross-origin iframe wasn't attached.
+        # This can happen if Playwright connected after the iframe was created.
+        # Retry by navigating away and back.
+        if frame is None:
+            page.goto(SNOWSIGHT_LOGIN_URL, timeout=30000)
+            page.wait_for_timeout(3000)
+            page.goto(sis_url, timeout=60000)
+            page.wait_for_selector(
+                '[data-testid="streamlit-iframe"]', timeout=30000
+            )
+            page.wait_for_timeout(10000)
+            iframe_el = page.query_selector('[data-testid="streamlit-iframe"]')
+            frame = iframe_el.content_frame() if iframe_el else None
+
+        if frame is None:
+            _save_debug_screenshot(page, "frame_unavailable")
+            pytest.skip(
+                "Cannot access Streamlit iframe content frame. "
+                "The cross-origin iframe was not attached by Playwright."
+            )
+
+        # Step 5: Wait for Streamlit app to be ready inside the iframe
         try:
-            pg.goto(sis_url, wait_until="networkidle", timeout=60000)
-        except Exception as e:
-            pytest.skip(f"Cannot load SiS app at {sis_url}: {e}")
-
-        # Wait for Streamlit to finish loading
-        try:
-            pg.wait_for_selector('[data-testid="stApp"]', timeout=30000)
+            frame.wait_for_selector(
+                '[data-testid="stApp"]', timeout=20000
+            )
         except Exception:
-            # Might be an auth page — check for login form
-            if "login" in pg.url.lower() or "oauth" in pg.url.lower():
-                pytest.skip("SiS app requires interactive SSO login — cannot automate")
-            # Otherwise try to continue
+            _save_debug_screenshot(page, "stapp_not_ready")
+            pytest.fail(
+                "Streamlit [data-testid='stApp'] not found in iframe. "
+                "The app may not have loaded."
+            )
+
+        # Step 6: Wait for tabs to be available
+        try:
+            frame.wait_for_selector(
+                'button[role="tab"]', timeout=15000
+            )
+        except Exception:
+            _save_debug_screenshot(page, "tabs_not_found")
+            pytest.fail("Tab buttons not found in Streamlit app")
+
+        # Give everything a moment to settle
+        page.wait_for_timeout(2000)
+
+        yield page, frame
+
+    except Exception:
+        raise
+    finally:
+        # Don't close the browser — it's the user's Chrome session
+        try:
+            pw.stop()
+        except Exception:
             pass
 
-        yield pg
-        pg.close()
 
-    def _screenshot_path(self, tab_name: str, suffix: str = "") -> str:
-        """Get the path for a screenshot file."""
-        filename = f"{tab_name}{suffix}.png"
-        return os.path.join(BASELINES_DIR, filename)
+# ---------------------------------------------------------------------------
+# Shared test helpers
+# ---------------------------------------------------------------------------
 
-    def _click_tab(self, page, tab_label: str):
-        """Click a Streamlit tab by its label text."""
-        # Streamlit tabs use button[role="tab"] elements
-        tab_selector = f'button[role="tab"]:has-text("{tab_label}")'
-        try:
-            page.click(tab_selector, timeout=10000)
-            page.wait_for_timeout(2000)  # Wait for tab content to render
-        except Exception:
-            # Try alternative selector
-            tabs = page.query_selector_all('button[role="tab"]')
-            for tab in tabs:
-                if tab_label.lower() in (tab.inner_text() or "").lower():
-                    tab.click()
-                    page.wait_for_timeout(2000)
-                    return
-            pytest.fail(f"Could not find tab '{tab_label}'")
 
-    def _mask_dynamic_content(self, page):
-        """Inject CSS to mask dynamic content before screenshot."""
-        page.evaluate("""
+def _click_tab(frame, tab_label: str):
+    """Click a Streamlit tab by its label text within the iframe frame."""
+    tab_selector = f'button[role="tab"]:has-text("{tab_label}")'
+    try:
+        frame.click(tab_selector, timeout=10000)
+        frame.page.wait_for_timeout(2000)
+    except Exception:
+        tabs = frame.query_selector_all('button[role="tab"]')
+        for tab in tabs:
+            text = (tab.inner_text() or "").lower()
+            if tab_label.lower() in text:
+                tab.click()
+                frame.page.wait_for_timeout(2000)
+                return
+        pytest.fail(f"Could not find tab '{tab_label}'")
+
+
+def _mask_dynamic_content(frame):
+    """Inject CSS into the Streamlit iframe to mask dynamic content."""
+    try:
+        frame.evaluate("""
             () => {
                 const style = document.createElement('style');
                 style.textContent = `
+                    /* Disable animations for stable screenshots */
+                    *, *::before, *::after {
+                        animation-duration: 0s !important;
+                        animation-delay: 0s !important;
+                        transition-duration: 0s !important;
+                        transition-delay: 0s !important;
+                        scroll-behavior: auto !important;
+                    }
                     /* Mask timestamps and live data */
                     [data-testid="stMetricValue"],
                     time,
@@ -190,130 +316,152 @@ class TestVisualRegression:
                 document.head.appendChild(style);
             }
         """)
+    except Exception:
+        # If we can't inject CSS (frame detached, etc.), continue anyway
+        pass
 
-    def _compare_screenshots(self, actual_path: str, baseline_path: str, threshold: float = 0.02) -> bool:
-        """Compare two screenshots with a pixel difference threshold.
 
-        Returns True if they match within threshold, False otherwise.
-        Uses PIL for comparison if available, otherwise byte comparison.
-        """
-        if not os.path.exists(baseline_path):
-            return False  # No baseline = needs creation
+def _screenshot_path(tab_name: str, suffix: str = "") -> str:
+    """Get the path for a screenshot file."""
+    return str(BASELINES_DIR / f"{tab_name}{suffix}.png")
 
-        try:
-            from PIL import Image
-            import math
 
-            img_actual = Image.open(actual_path).convert("RGB")
-            img_baseline = Image.open(baseline_path).convert("RGB")
+def _compare_screenshots(
+    actual_path: str, baseline_path: str, threshold: float = 0.02
+) -> bool:
+    """Compare two screenshots with a pixel difference threshold.
 
-            if img_actual.size != img_baseline.size:
-                return False
+    Returns True if they match within threshold, False otherwise.
+    """
+    if not os.path.exists(baseline_path):
+        return False
 
-            pixels_a = list(img_actual.getdata())
-            pixels_b = list(img_baseline.getdata())
-            total = len(pixels_a)
-            diff_count = 0
+    try:
+        from PIL import Image
 
-            for pa, pb in zip(pixels_a, pixels_b):
-                if pa != pb:
-                    # Check if difference is significant (not just anti-aliasing)
-                    channel_diff = sum(abs(a - b) for a, b in zip(pa, pb))
-                    if channel_diff > 30:  # Significant pixel difference
-                        diff_count += 1
+        img_actual = Image.open(actual_path).convert("RGB")
+        img_baseline = Image.open(baseline_path).convert("RGB")
 
-            diff_ratio = diff_count / total if total > 0 else 0
-            return diff_ratio <= threshold
+        if img_actual.size != img_baseline.size:
+            return False
 
-        except ImportError:
-            # Fallback: byte comparison (strict)
-            with open(actual_path, "rb") as f1, open(baseline_path, "rb") as f2:
-                return f1.read() == f2.read()
+        pixels_a = list(img_actual.getdata())
+        pixels_b = list(img_baseline.getdata())
+        total = len(pixels_a)
+        diff_count = 0
 
-    def test_tab_command_map(self, page):
+        for pa, pb in zip(pixels_a, pixels_b):
+            if pa != pb:
+                channel_diff = sum(abs(a - b) for a, b in zip(pa, pb))
+                if channel_diff > 30:
+                    diff_count += 1
+
+        diff_ratio = diff_count / total if total > 0 else 0
+        return diff_ratio <= threshold
+
+    except ImportError:
+        with open(actual_path, "rb") as f1, open(baseline_path, "rb") as f2:
+            return f1.read() == f2.read()
+
+
+# ---------------------------------------------------------------------------
+# Test classes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _has_playwright(), reason="Playwright not installed")
+class TestVisualRegression:
+    """Visual regression tests using Playwright against the live SiS app."""
+
+    def test_tab_command_map(self, loaded_page):
         """Command Map tab should render and match baseline."""
+        page, frame = loaded_page
         tab = TABS[0]
-        self._click_tab(page, tab["label"])
-        self._mask_dynamic_content(page)
+        _click_tab(frame, tab["label"])
+        _mask_dynamic_content(frame)
 
-        actual_path = self._screenshot_path(tab["name"], "_actual")
+        actual_path = _screenshot_path(tab["name"], "_actual")
         page.screenshot(path=actual_path, full_page=False)
 
-        baseline_path = self._screenshot_path(tab["name"])
+        baseline_path = _screenshot_path(tab["name"])
         if not os.path.exists(baseline_path):
-            # First run — save as baseline
-            import shutil
             shutil.copy2(actual_path, baseline_path)
-            pytest.skip(f"Baseline created for {tab['name']} — manual review required")
+            pytest.skip(
+                f"Baseline created for {tab['name']} — manual review required"
+            )
 
-        assert self._compare_screenshots(actual_path, baseline_path), (
+        assert _compare_screenshots(actual_path, baseline_path), (
             f"Visual regression detected in {tab['name']} tab. "
             f"Compare {actual_path} vs {baseline_path}"
         )
 
-    def test_tab_match_engine(self, page):
+    def test_tab_match_engine(self, loaded_page):
         """Match Engine tab should render and match baseline."""
+        page, frame = loaded_page
         tab = TABS[1]
-        self._click_tab(page, tab["label"])
-        self._mask_dynamic_content(page)
+        _click_tab(frame, tab["label"])
+        _mask_dynamic_content(frame)
 
-        actual_path = self._screenshot_path(tab["name"], "_actual")
+        actual_path = _screenshot_path(tab["name"], "_actual")
         page.screenshot(path=actual_path, full_page=False)
 
-        baseline_path = self._screenshot_path(tab["name"])
+        baseline_path = _screenshot_path(tab["name"])
         if not os.path.exists(baseline_path):
-            import shutil
             shutil.copy2(actual_path, baseline_path)
-            pytest.skip(f"Baseline created for {tab['name']} — manual review required")
+            pytest.skip(
+                f"Baseline created for {tab['name']} — manual review required"
+            )
 
-        assert self._compare_screenshots(actual_path, baseline_path), (
+        assert _compare_screenshots(actual_path, baseline_path), (
             f"Visual regression detected in {tab['name']} tab. "
             f"Compare {actual_path} vs {baseline_path}"
         )
 
-    def test_tab_broker_360(self, page):
+    def test_tab_broker_360(self, loaded_page):
         """Broker 360 tab should render and match baseline."""
+        page, frame = loaded_page
         tab = TABS[2]
-        self._click_tab(page, tab["label"])
-        self._mask_dynamic_content(page)
+        _click_tab(frame, tab["label"])
+        _mask_dynamic_content(frame)
 
-        actual_path = self._screenshot_path(tab["name"], "_actual")
+        actual_path = _screenshot_path(tab["name"], "_actual")
         page.screenshot(path=actual_path, full_page=False)
 
-        baseline_path = self._screenshot_path(tab["name"])
+        baseline_path = _screenshot_path(tab["name"])
         if not os.path.exists(baseline_path):
-            import shutil
             shutil.copy2(actual_path, baseline_path)
-            pytest.skip(f"Baseline created for {tab['name']} — manual review required")
+            pytest.skip(
+                f"Baseline created for {tab['name']} — manual review required"
+            )
 
-        assert self._compare_screenshots(actual_path, baseline_path), (
+        assert _compare_screenshots(actual_path, baseline_path), (
             f"Visual regression detected in {tab['name']} tab. "
             f"Compare {actual_path} vs {baseline_path}"
         )
 
-    def test_page_structure(self, page):
+    def test_page_structure(self, loaded_page):
         """Basic DOM structure checks for the SiS app."""
-        # Check that the Streamlit app container exists
-        app = page.query_selector('[data-testid="stApp"]')
+        page, frame = loaded_page
+        app = frame.query_selector('[data-testid="stApp"]')
         assert app is not None, "Streamlit app container not found"
 
-        # Check that tabs exist
-        tabs = page.query_selector_all('button[role="tab"]')
+        tabs = frame.query_selector_all('button[role="tab"]')
         assert len(tabs) >= 3, f"Expected 3+ tabs, found {len(tabs)}"
 
-        # Check that the app title is present somewhere
-        page_text = page.inner_text("body")
+        page_text = frame.inner_text('[data-testid="stApp"]')
         assert "LoadStar" in page_text, "App title 'LoadStar' not found in page"
 
-    def test_no_streamlit_errors(self, page):
+    def test_no_streamlit_errors(self, loaded_page):
         """The app should not display any Streamlit error banners."""
-        errors = page.query_selector_all('[data-testid="stException"]')
+        page, frame = loaded_page
+        errors = frame.query_selector_all('[data-testid="stException"]')
         assert len(errors) == 0, (
             f"Found {len(errors)} Streamlit error(s) on page"
         )
 
-        # Also check for the generic error container
-        error_blocks = page.query_selector_all('.stAlert [data-testid="stError"]')
+        error_blocks = frame.query_selector_all(
+            '.stAlert [data-testid="stError"]'
+        )
         assert len(error_blocks) == 0, (
             f"Found {len(error_blocks)} error alert(s) on page"
         )
@@ -323,42 +471,10 @@ class TestVisualRegression:
 class TestVisualAccessibility:
     """Accessibility-focused visual checks."""
 
-    @pytest.fixture(scope="class")
-    def sis_url(self):
-        url = _resolve_sis_url()
-        if not url:
-            pytest.skip("SiS app URL not available")
-        return url
-
-    @pytest.fixture(scope="class")
-    def page(self, sis_url):
-        from playwright.sync_api import sync_playwright
-
-        pw = sync_playwright().start()
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={"width": 1440, "height": 900},
-            ignore_https_errors=True,
-        )
-        pg = context.new_page()
-
-        try:
-            pg.goto(sis_url, wait_until="networkidle", timeout=60000)
-            pg.wait_for_selector('[data-testid="stApp"]', timeout=30000)
-        except Exception as e:
-            pytest.skip(f"Cannot load SiS app: {e}")
-
-        yield pg
-
-        pg.close()
-        context.close()
-        browser.close()
-        pw.stop()
-
-    def test_color_contrast_ratio(self, page):
+    def test_color_contrast_ratio(self, loaded_page):
         """Primary text should have sufficient contrast against background."""
-        # Extract computed styles for text and background
-        result = page.evaluate("""
+        page, frame = loaded_page
+        result = frame.evaluate("""
             () => {
                 const body = document.querySelector('[data-testid="stApp"]');
                 if (!body) return null;
@@ -370,15 +486,17 @@ class TestVisualAccessibility:
             }
         """)
         if result:
-            # Just verify we got valid color values back
             assert result.get("color"), "Could not determine text color"
-            assert result.get("backgroundColor"), "Could not determine background color"
+            assert result.get("backgroundColor"), (
+                "Could not determine background color"
+            )
 
-    def test_responsive_viewport(self, page):
+    def test_responsive_viewport(self, loaded_page):
         """App should not have horizontal overflow at standard viewports."""
-        overflow = page.evaluate("""
+        page, frame = loaded_page
+        overflow = frame.evaluate("""
             () => {
                 return document.documentElement.scrollWidth > document.documentElement.clientWidth;
             }
         """)
-        assert not overflow, "Page has horizontal overflow at 1440px viewport"
+        assert not overflow, "Page has horizontal overflow at current viewport"

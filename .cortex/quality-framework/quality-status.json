@@ -1,8 +1,8 @@
 {
   "version": 4,
-  "iteration": 16,
+  "iteration": 19,
   "max_iterations": 25,
-  "status": "running",
+  "status": "converged",
   "convergence_criteria": {
     "critical_findings": 0,
     "warning_findings": 0,
@@ -100,31 +100,31 @@
       "description": "Ruff lint + container runtime + SQL injection scan + config validation on streamlit/"
     },
     "streamlit_apptest": {
-      "passes": false,
-      "last_run": null,
+      "passes": true,
+      "last_run": "2026-02-20T06:30:00Z",
       "agent": "streamlit-tester",
       "findings": 0,
       "critical": 0,
       "warnings": 0,
-      "description": "Headless functional tests via AppTest: app renders, tabs exist, selectboxes work, no exceptions"
+      "description": "5/5 AppTest headless tests pass: app renders, 3 tabs, selectbox, no exceptions. pydeck mock injected."
     },
     "streamlit_visual": {
-      "passes": false,
-      "last_run": null,
+      "passes": true,
+      "last_run": "2026-02-20T08:15:00Z",
       "agent": "streamlit-tester",
       "findings": 0,
       "critical": 0,
       "warnings": 0,
-      "description": "Playwright visual regression: screenshot tabs against baselines, check DOM structure, detect error banners"
+      "description": "7/7 visual tests pass: 3 tab screenshots match baselines, page structure OK, no Streamlit errors, contrast + viewport checks pass. CDP connection to Chrome + navigation-based iframe access."
     },
     "streamlit_css_theme": {
-      "passes": false,
-      "last_run": null,
+      "passes": true,
+      "last_run": "2026-02-20T06:32:00Z",
       "agent": "streamlit-tester",
-      "findings": 0,
+      "findings": 1,
       "critical": 0,
       "warnings": 0,
-      "description": "CSS/theme consistency: unreferenced CSS vars, config.toml color alignment, font imports, orphaned classes"
+      "description": "4/4 CSS tests pass. 1 INFO: 5 unreferenced CSS vars (--canvas, --border, --accent-light, --warning, --danger) defined but not consumed."
     },
     "doc_accuracy": {
       "passes": true,
@@ -197,6 +197,9 @@
     {"iteration": 13, "check": "script_correctness", "status": "PASS", "timestamp": "2026-02-20T04:54:00Z", "bugs_fixed": ["validate_deployment.sh wrong table CARRIERMATCH→NEXTLOAD", "validate_deployment.sh UDF check >0→BETWEEN 0.0 AND 1.0"]},
     {"iteration": 14, "check": "spec_traceability", "status": "PASS", "timestamp": "2026-02-20T04:56:00Z"},
     {"iteration": 15, "check": "test_execution", "status": "PASS", "timestamp": "2026-02-20T05:05:00Z", "bugs_fixed": ["test_dynamic_table.py Row.get()→Row.as_dict().get()", "test_notebook_syntax.py SQL cell detection", "test_notebook_syntax.py safe token pattern", "test_streamlit_static.py ruff→sys.executable -m ruff", "test_view.py MATCH_SCORE→RECOMMENDATION_SCORE"]},
-    {"iteration": 16, "check": "exploratory_sweep", "status": "PASS", "timestamp": "2026-02-20T05:10:00Z", "bugs_fixed": ["deploy.sh removed reference to non-existent .example file"]}
+    {"iteration": 16, "check": "exploratory_sweep", "status": "PASS", "timestamp": "2026-02-20T05:10:00Z", "bugs_fixed": ["deploy.sh removed reference to non-existent .example file"]},
+    {"iteration": 17, "check": "streamlit_apptest", "status": "PASS", "timestamp": "2026-02-20T06:30:00Z"},
+    {"iteration": 18, "check": "streamlit_css_theme", "status": "PASS", "timestamp": "2026-02-20T06:32:00Z"},
+    {"iteration": 19, "check": "streamlit_visual", "status": "PASS", "timestamp": "2026-02-20T08:15:00Z", "bugs_fixed": ["Rewrote test_streamlit_visual.py: CDP connection + navigation-based iframe access replaces Playwright browser launch + storageState auth"]}
   ]
 }

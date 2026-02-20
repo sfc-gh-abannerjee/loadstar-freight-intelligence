@@ -56,6 +56,19 @@ Thumbs.db
 *.connection.toml
 
 # ============================================
+# Playwright auth state (session cookies)
+# ============================================
+tests/.playwright-auth/
+.playwright-screenshots/
+
+# ============================================
+# Visual test ephemeral outputs
+# ============================================
+tests/visual_baselines/*_actual.png
+tests/visual_baselines/*_debug.png
+debug.log
+
+# ============================================
 # Snowflake CLI deploy artifacts
 # ============================================
 **/output/
