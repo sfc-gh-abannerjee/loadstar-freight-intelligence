@@ -297,6 +297,20 @@ def call_cortex_agent_streaming(question: str, broker_context: str = ""):
                         last_status = message
                         yield ("status", message)
                 
+                # Tool result (contains SQL queries and other tool outputs)
+                elif event_type == "response.tool_result":
+                    # Try to extract SQL from tool results
+                    tool_result = parsed.get("tool_result", parsed)
+                    if isinstance(tool_result, dict):
+                        # Check for SQL in various locations
+                        sql = tool_result.get("sql", "")
+                        if not sql:
+                            content = tool_result.get("content", "")
+                            if isinstance(content, str) and content.strip().upper().startswith(("SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")):
+                                sql = content
+                        if sql:
+                            yield ("sql", sql.strip())
+                
                 # Text delta events (answer tokens)
                 elif event_type == "response.text.delta":
                     text = parsed.get("text", "")
@@ -391,15 +405,27 @@ def render_thinking_html(steps: list, reasoning: str = "") -> str:
         if category == "planning":
             icon = "✓"
             color = "#1a6ce7"
+            html_parts.append(f'''
+            <div class="step-item" style="border-left: 3px solid {color}; padding-left: 12px; margin-bottom: 8px;">
+                <span class="icon">{icon}</span> {text}
+            </div>
+            ''')
+        elif category == "sql":
+            # SQL queries get a code block
+            html_parts.append(f'''
+            <div class="step-item" style="border-left: 3px solid #9c5bea; padding-left: 12px; margin-bottom: 12px;">
+                <div style="font-size: 0.75rem; color: #9c5bea; font-weight: 600; margin-bottom: 6px;">📊 SQL Query</div>
+                <pre style="background: #1a1d24; border-radius: 6px; padding: 10px 12px; margin: 0; overflow-x: auto; font-size: 0.8rem; line-height: 1.4;"><code style="color: #e0e6ed; font-family: 'SF Mono', Monaco, Consolas, monospace;">{text}</code></pre>
+            </div>
+            ''')
         else:  # tool
             icon = "⚡"
             color = "#e8a317"
-        
-        html_parts.append(f'''
-        <div class="step-item" style="border-left: 3px solid {color}; padding-left: 12px; margin-bottom: 8px;">
-            <span class="icon">{icon}</span> {text}
-        </div>
-        ''')
+            html_parts.append(f'''
+            <div class="step-item" style="border-left: 3px solid {color}; padding-left: 12px; margin-bottom: 8px;">
+                <span class="icon">{icon}</span> {text}
+            </div>
+            ''')
     
     # Reasoning section at the end (if present)
     if reasoning:
@@ -1152,6 +1178,10 @@ with tab_broker:
                         if not steps or steps[-1].get("text") != text:
                             steps.append({"category": category, "text": text})
                         # Update display with chronological timeline
+                        thinking_placeholder.html(render_thinking_html(steps, reasoning))
+                    elif mode == "sql":
+                        # SQL query - add as special category with code block
+                        steps.append({"category": "sql", "text": text})
                         thinking_placeholder.html(render_thinking_html(steps, reasoning))
                     elif mode == "thinking":
                         # Thinking text is already accumulated, just keep latest
