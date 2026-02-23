@@ -3,12 +3,14 @@ LoadStar Commander — Freight intelligence dashboard.
 Runs on Snowflake Container Runtime (SPCS).
 """
 
+import json
 import os
 
 import pandas as pd
 import plotly.graph_objects as go
 import pydeck as pdk
 import requests
+import sseclient
 
 import streamlit as st
 
@@ -17,7 +19,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="LoadStar Commander",
-    page_icon=":material/local_shipping:",
+    page_icon="🚛",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -107,6 +109,7 @@ html, body, [class*="st-"] {
 .risk-medium { background: rgba(232,163,23,0.15); color: #e8a317; }
 .risk-high { background: rgba(211,19,47,0.15); color: #ef405e; }
 .risk-critical { background: rgba(211,19,47,0.25); color: #ef405e; font-weight: 700; }
+.risk-na { background: rgba(159,171,193,0.15); color: #9fabc1; }
 
 /* Match score gauge */
 .match-gauge {
@@ -141,6 +144,56 @@ html, body, [class*="st-"] {
     color: var(--text-secondary);
     margin-top: 2px;
 }
+
+/* Fix for Material Icons not loading in SiS - hide broken icon text in expander */
+[data-testid="stExpander"] summary > span:first-child {
+    display: none !important;
+}
+[data-testid="stExpander"] summary::before {
+    content: "▶";
+    margin-right: 8px;
+    font-size: 0.8rem;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+[data-testid="stExpander"][open] summary::before {
+    content: "▼";
+}
+
+/* Agent thinking step cards */
+.thinking-section {
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+    border-left: 3px solid var(--accent);
+}
+.thinking-section.planning { border-left-color: #1a6ce7; }
+.thinking-section.tools { border-left-color: #e8a317; }
+.thinking-section.reasoning { border-left-color: #1db588; }
+.section-label {
+    font-weight: 600;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+.step-item {
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    padding: 3px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+}
+.step-item .icon { flex-shrink: 0; }
+.reasoning-text {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    white-space: pre-wrap;
+}
 </style>
 """
 st.html(NEUMORPH_CSS)
@@ -163,8 +216,211 @@ def run_query(sql: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Cortex Agent helper (container runtime auth)
 # ---------------------------------------------------------------------------
-def call_cortex_agent(question: str) -> str:
-    """Call the Broker Intelligence Agent via REST API."""
+def call_cortex_agent_streaming(question: str, broker_context: str = ""):
+    """Call the Broker Intelligence Agent via REST API with streaming.
+    
+    Yields tuples of (mode, text) where mode is one of:
+    - "thinking": Agent's reasoning tokens (shown during planning)
+    - "status": Status updates like "Planning..." or "Executing tool..."
+    - "answer": Final answer tokens
+    """
+    host = os.getenv("SNOWFLAKE_HOST")
+    if not host:
+        yield ("answer", "Agent unavailable — SNOWFLAKE_HOST not set.")
+        return
+    try:
+        token = open("/snowflake/session/token", "r").read()
+    except FileNotFoundError:
+        yield ("answer", "Agent unavailable — session token not found.")
+        return
+
+    # Add broker context to the question if provided
+    full_question = f"Regarding broker '{broker_context}': {question}" if broker_context else question
+
+    url = (
+        f"https://{host}/api/v2/databases/APEX_CAPITAL_DEMO"
+        f"/schemas/ANALYTICS/agents/APEX_BROKER_AGENT:run"
+    )
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "X-Snowflake-Authorization-Token-Type": "OAUTH",
+        "Accept": "text/event-stream",
+    }
+    payload = {
+        "stream": True,
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": full_question}]
+        }],
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=120, stream=True)
+        if resp.status_code != 200:
+            yield ("answer", f"Agent returned HTTP {resp.status_code}")
+            return
+        
+        # Use sseclient to properly parse SSE events
+        client = sseclient.SSEClient(resp)
+        thinking_text = ""
+        answer_text = ""
+        last_status = ""
+        
+        for event in client.events():
+            try:
+                # Skip empty data
+                if not event.data or event.data.strip() == "" or event.data == "[DONE]":
+                    continue
+                
+                parsed = json.loads(event.data)
+                event_type = event.event or ""
+                
+                # Status events (Planning, Executing tool, etc.)
+                if event_type == "response.status":
+                    status = parsed.get("status", "")
+                    message = parsed.get("message", "")
+                    if message and message != last_status:
+                        last_status = message
+                        yield ("status", message)
+                
+                # Thinking delta events (reasoning tokens)
+                elif event_type == "response.thinking.delta":
+                    text = parsed.get("text", "")
+                    if text:
+                        thinking_text += text
+                        yield ("thinking", thinking_text)
+                
+                # Tool result status (shows what tool is running)
+                elif event_type == "response.tool_result.status":
+                    message = parsed.get("message", "")
+                    if message and message != last_status:
+                        last_status = message
+                        yield ("status", message)
+                
+                # Text delta events (answer tokens)
+                elif event_type == "response.text.delta":
+                    text = parsed.get("text", "")
+                    if text:
+                        answer_text += text
+                        yield ("answer", answer_text)
+                
+                # Message delta events
+                elif event_type == "message.delta":
+                    delta = parsed.get("delta", {})
+                    if isinstance(delta, dict):
+                        content = delta.get("content", [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    text = item.get("text", "")
+                                    if text:
+                                        answer_text += text
+                                        yield ("answer", answer_text)
+                        elif isinstance(content, dict):
+                            if content.get("type") == "text":
+                                text = content.get("text", "")
+                                if text:
+                                    answer_text += text
+                                    yield ("answer", answer_text)
+                
+                # Final response event (contains full message)
+                elif event_type == "response":
+                    # Extract final text from response if we haven't collected anything
+                    if not answer_text:
+                        content = parsed.get("content", [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and item.get("type") == "text":
+                                    text = item.get("text", "")
+                                    if text:
+                                        answer_text = text
+                                        yield ("answer", answer_text)
+                
+                # Fallback: try to extract text from delta.content structure
+                elif "delta" in parsed:
+                    delta = parsed["delta"]
+                    if isinstance(delta, dict):
+                        content = delta.get("content", {})
+                        if isinstance(content, dict) and content.get("type") == "text":
+                            text = content.get("text", "")
+                            if text:
+                                answer_text += text
+                                yield ("answer", answer_text)
+                        elif isinstance(content, str):
+                            answer_text += content
+                            yield ("answer", answer_text)
+                    elif isinstance(delta, str):
+                        answer_text += delta
+                        yield ("answer", answer_text)
+                
+            except json.JSONDecodeError:
+                continue
+            except Exception:
+                continue
+        
+        if not answer_text:
+            yield ("answer", "No response from agent.")
+    except requests.exceptions.Timeout:
+        yield ("answer", "Agent request timed out. Please try again.")
+    except Exception as e:
+        yield ("answer", f"Agent error: {str(e)}")
+
+
+def categorize_status(message: str) -> str:
+    """Categorize a status message into planning, tool, or other."""
+    lower = message.lower()
+    planning_keywords = ["planning", "choosing", "rethinking", "reviewing", "next steps", "data sources"]
+    tool_keywords = ["running", "streaming", "getting", "executing", "context", "sql"]
+    
+    if any(kw in lower for kw in planning_keywords):
+        return "planning"
+    elif any(kw in lower for kw in tool_keywords):
+        return "tool"
+    return "planning"  # Default to planning for unknown status
+
+
+def render_thinking_html(steps: dict) -> str:
+    """Render thinking steps as styled HTML cards."""
+    html_parts = []
+    
+    # Planning section
+    if steps.get("planning"):
+        items = "".join(f'<div class="step-item"><span class="icon">✓</span>{s}</div>' for s in steps["planning"])
+        html_parts.append(f'''
+        <div class="thinking-section planning">
+            <div class="section-label">📋 Planning</div>
+            {items}
+        </div>
+        ''')
+    
+    # Tools section
+    if steps.get("tools"):
+        items = "".join(f'<div class="step-item"><span class="icon">⚡</span>{s}</div>' for s in steps["tools"])
+        html_parts.append(f'''
+        <div class="thinking-section tools">
+            <div class="section-label">🔧 Tool Execution</div>
+            {items}
+        </div>
+        ''')
+    
+    # Reasoning section
+    if steps.get("reasoning"):
+        # Truncate very long reasoning for display
+        reasoning = steps["reasoning"]
+        if len(reasoning) > 800:
+            reasoning = reasoning[:800] + "..."
+        html_parts.append(f'''
+        <div class="thinking-section reasoning">
+            <div class="section-label">🧠 Agent Reasoning</div>
+            <div class="reasoning-text">{reasoning}</div>
+        </div>
+        ''')
+    
+    return "".join(html_parts) if html_parts else '<div class="thinking-section"><em>Processing...</em></div>'
+
+
+def call_cortex_agent(question: str, broker_context: str = "") -> str:
+    """Call the Broker Intelligence Agent via REST API (non-streaming fallback)."""
     host = os.getenv("SNOWFLAKE_HOST")
     if not host:
         return "Agent unavailable — SNOWFLAKE_HOST not set."
@@ -172,6 +428,8 @@ def call_cortex_agent(question: str) -> str:
         token = open("/snowflake/session/token", "r").read()
     except FileNotFoundError:
         return "Agent unavailable — session token not found."
+
+    full_question = f"Regarding broker '{broker_context}': {question}" if broker_context else question
 
     url = (
         f"https://{host}/api/v2/databases/APEX_CAPITAL_DEMO"
@@ -185,36 +443,63 @@ def call_cortex_agent(question: str) -> str:
     }
     payload = {
         "stream": False,
-        "messages": [{"role": "user", "content": question}],
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": full_question}]
+        }],
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    if resp.status_code != 200:
-        return f"Agent returned HTTP {resp.status_code}."
-    data = resp.json()
-    # Extract text from agent response
-    if "messages" in data:
-        for msg in data["messages"]:
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    parts = [
-                        p.get("text", "") for p in content if p.get("type") == "text"
-                    ]
-                    return "\n".join(parts) if parts else str(content)
-                return str(content)
-    return str(data)
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        if resp.status_code != 200:
+            return f"Agent returned HTTP {resp.status_code}"
+        data = resp.json()
+        
+        # Extract text from the response - handle multiple formats
+        text_parts = []
+        
+        # Check for 'message' (singular) or 'messages' (plural)
+        messages = data.get("messages", [])
+        if not messages and "message" in data:
+            messages = [data["message"]]
+        
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", [])
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_parts.append(item.get("text", ""))
+        
+        if text_parts:
+            return "\n".join(filter(None, text_parts))
+        
+        # Fallback: try to find any text in the response
+        if "text" in data:
+            return data["text"]
+        
+        return "No response from agent."
+    except requests.exceptions.Timeout:
+        return "Agent request timed out. Please try again."
+    except Exception as e:
+        return f"Agent error: {str(e)}"
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def risk_badge(level: str) -> str:
+    level_str = str(level).upper() if level else "N/A"
     css_class = {
         "LOW": "risk-low",
         "MEDIUM": "risk-medium",
         "HIGH": "risk-high",
         "CRITICAL": "risk-critical",
-    }.get(str(level).upper(), "risk-medium")
+        "N/A": "risk-na",
+        "NONE": "risk-na",
+    }.get(level_str, "risk-na")
     return f'<span class="risk-badge {css_class}">{level}</span>'
 
 
@@ -253,7 +538,7 @@ st.html(
 tab_map, tab_match, tab_broker = st.tabs(
     [
         ":material/map: Command map",
-        ":material/match_case: Match engine",
+        ":material/handshake: Match engine",
         ":material/person_search: Broker 360",
     ]
 )
@@ -281,94 +566,243 @@ with tab_map:
             WHERE ORIGIN_LATITUDE IS NOT NULL AND STATUS = 'AVAILABLE'
         """)
         weather = run_query("""
-            SELECT CITY_NAME, AVG_TEMP_F, MAX_WIND_MPH,
-                   PRECIPITATION_IN, WEATHER_RISK_LEVEL
+            SELECT CITY_NAME, 
+                   ROUND(AVG(AVG_TEMP_F), 1) AS AVG_TEMP_F, 
+                   ROUND(MAX(MAX_WIND_MPH), 1) AS MAX_WIND_MPH,
+                   ROUND(SUM(PRECIPITATION_IN), 2) AS PRECIPITATION_IN, 
+                   WEATHER_RISK_LEVEL
             FROM APEX_CAPITAL_DEMO.RAW.TEXAS_WEATHER
+            GROUP BY CITY_NAME, WEATHER_RISK_LEVEL
         """)
         return carriers, loads, weather
 
     carriers_df, loads_df, weather_df = load_map_data()
 
-    # Sidebar filters
-    with st.sidebar:
-        st.html('<div class="section-header">Map filters</div>')
-        equip_options = sorted(carriers_df["EQUIPMENT"].dropna().unique())
-        sel_equip = st.multiselect("Equipment type", equip_options, default=equip_options)
-        risk_options = sorted(weather_df["WEATHER_RISK_LEVEL"].dropna().unique())
-        sel_risk = st.multiselect("Weather risk", risk_options, default=risk_options)
-
-    # Filter
-    filt_carriers = carriers_df[carriers_df["EQUIPMENT"].isin(sel_equip)]
-    filt_weather = weather_df[weather_df["WEATHER_RISK_LEVEL"].isin(sel_risk)]
-
-    # KPI row
-    cols = st.columns(4)
-    with cols[0]:
-        st.html(stat_card("Active carriers", str(len(filt_carriers))))
-    with cols[1]:
+    # KPI row at top
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        st.html(stat_card("Active carriers", str(len(carriers_df))))
+    with kpi_cols[1]:
         st.html(stat_card("Available loads", str(len(loads_df))))
-    with cols[2]:
-        high_risk_ct = len(weather_df[weather_df["WEATHER_RISK_LEVEL"].isin(["HIGH", "SEVERE"])])
+    with kpi_cols[2]:
+        high_risk_ct = weather_df.loc[
+            weather_df["WEATHER_RISK_LEVEL"].isin(["HIGH"]), "CITY_NAME"
+        ].nunique()
         st.html(stat_card("High-risk cities", str(high_risk_ct), "var(--danger-light)"))
-    with cols[3]:
+    with kpi_cols[3]:
         avg_rate = f"${loads_df['TOTAL_RATE'].mean():,.0f}" if len(loads_df) else "$0"
         st.html(stat_card("Avg load rate", avg_rate, "var(--success)"))
 
-    # Map
-    def carrier_color(row):
-        if row["STATUS"] == "ACTIVE":
-            return [26, 108, 231, 180]
-        return [112, 129, 154, 120]
+    # Two-column layout: map on left, controls on right
+    map_col, ctrl_col = st.columns([3, 1])
 
-    filt_carriers = filt_carriers.copy()
-    filt_carriers["COLOR"] = filt_carriers.apply(carrier_color, axis=1)
+    with ctrl_col:
+        st.html('<div class="section-header">Find & Select</div>')
+        
+        view_mode = st.radio("View", ["Loads", "Carriers"], horizontal=True, label_visibility="collapsed")
+        
+        if view_mode == "Loads":
+            # Equipment filter
+            equip_opts = ["All equipment"] + sorted(loads_df["EQUIPMENT"].dropna().unique().tolist())
+            sel_equip = st.selectbox("Equipment", equip_opts, label_visibility="collapsed")
+            
+            display_df = loads_df.copy()
+            if sel_equip != "All equipment":
+                display_df = display_df[display_df["EQUIPMENT"] == sel_equip]
+            
+            # Searchable selectbox instead of radio list
+            load_options = display_df.apply(
+                lambda r: f"{r['LOAD_ID']} — {r['ORIGIN_CITY']} → {r['DEST_CITY']}",
+                axis=1
+            ).tolist()
+            
+            if load_options:
+                selected_item = st.selectbox(
+                    "Select load",
+                    load_options,
+                    label_visibility="collapsed",
+                    placeholder="Search loads...",
+                )
+                selected_idx = load_options.index(selected_item)
+                selected_row = display_df.iloc[selected_idx]
+                center_lat, center_lon = selected_row["O_LAT"], selected_row["O_LON"]
+                zoom_level = 8
+                
+                # Compact detail card
+                st.html(f"""
+                <div class="neu-card">
+                    <div style="font-weight:700;color:var(--text-header);margin-bottom:6px;">{selected_row['LOAD_ID']}</div>
+                    <div style="font-size:0.85rem;color:var(--text-primary);">
+                        {selected_row['ORIGIN_CITY']}, {selected_row['ORIGIN_STATE']}<br/>
+                        → {selected_row['DEST_CITY']}, {selected_row['DEST_STATE']}
+                    </div>
+                    <div style="display:flex;justify-content:space-between;margin-top:10px;">
+                        <span style="color:var(--success);font-weight:600;font-size:1.2rem;">${selected_row['TOTAL_RATE']:,.0f}</span>
+                        <span style="color:var(--text-secondary);font-size:0.85rem;">{selected_row['EQUIPMENT']}</span>
+                    </div>
+                </div>
+                """)
+            else:
+                center_lat, center_lon, zoom_level = 32.5, -99.5, 5.5
+                selected_row = None
+        else:
+            # Carriers view
+            status_opts = ["All statuses"] + sorted(carriers_df["STATUS"].dropna().unique().tolist())
+            sel_status = st.selectbox("Status", status_opts, label_visibility="collapsed")
+            
+            display_df = carriers_df.copy()
+            if sel_status != "All statuses":
+                display_df = display_df[display_df["STATUS"] == sel_status]
+            
+            carrier_options = display_df.apply(
+                lambda r: f"{r['CARRIER_NAME']} ({r['EQUIPMENT']})",
+                axis=1
+            ).tolist()
+            
+            if carrier_options:
+                selected_item = st.selectbox(
+                    "Select carrier",
+                    carrier_options,
+                    label_visibility="collapsed",
+                    placeholder="Search carriers...",
+                )
+                selected_idx = carrier_options.index(selected_item)
+                selected_row = display_df.iloc[selected_idx]
+                center_lat, center_lon = selected_row["LAT"], selected_row["LON"]
+                zoom_level = 9
+                
+                status_color = "var(--success)" if selected_row["STATUS"] == "ACTIVE" else "var(--text-secondary)"
+                st.html(f"""
+                <div class="neu-card">
+                    <div style="font-weight:700;color:var(--text-header);margin-bottom:6px;">{selected_row['CARRIER_NAME']}</div>
+                    <div style="font-size:0.85rem;color:var(--text-primary);">Equipment: {selected_row['EQUIPMENT']}</div>
+                    <div style="display:flex;justify-content:space-between;margin-top:10px;">
+                        <span style="color:{status_color};font-weight:600;">{selected_row['STATUS']}</span>
+                        <span style="color:var(--text-secondary);font-size:0.85rem;">{selected_row['FLEET_SIZE']} trucks</span>
+                    </div>
+                </div>
+                """)
+            else:
+                center_lat, center_lon, zoom_level = 32.5, -99.5, 5.5
+                selected_row = None
 
-    carrier_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=filt_carriers,
-        get_position=["LON", "LAT"],
-        get_fill_color="COLOR",
-        get_radius=25000,
-        pickable=True,
-        auto_highlight=True,
-    )
+    with map_col:
+        # Build map layers
+        view = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom_level, pitch=0)
+        
+        layers = []
+        
+        if view_mode == "Loads":
+            # All loads as small dots
+            loads_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=loads_df,
+                get_position=["O_LON", "O_LAT"],
+                get_fill_color=[29, 181, 136, 180],
+                get_radius=800,
+                radius_min_pixels=4,
+                radius_max_pixels=12,
+                pickable=True,
+                auto_highlight=True,
+            )
+            layers.append(loads_layer)
+            
+            # Highlight selected load
+            if selected_row is not None:
+                highlight_df = pd.DataFrame([{
+                    "LAT": selected_row["O_LAT"],
+                    "LON": selected_row["O_LON"],
+                    "LOAD_ID": selected_row["LOAD_ID"],
+                }])
+                highlight_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=highlight_df,
+                    get_position=["LON", "LAT"],
+                    get_fill_color=[255, 215, 0, 255],
+                    get_radius=2000,
+                    radius_min_pixels=8,
+                    radius_max_pixels=20,
+                    pickable=False,
+                )
+                layers.append(highlight_layer)
+            
+            tooltip_html = "<b>{LOAD_ID}</b><br/>{ORIGIN_CITY} → {DEST_CITY}<br/>Rate: ${TOTAL_RATE}<br/>Equipment: {EQUIPMENT}"
+        else:
+            # All carriers as small dots
+            carrier_map = carriers_df.copy()
+            carrier_map["COLOR"] = carrier_map.apply(
+                lambda r: [26, 108, 231, 200] if r["STATUS"] == "ACTIVE" else [112, 129, 154, 140],
+                axis=1,
+            )
+            carriers_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=carrier_map,
+                get_position=["LON", "LAT"],
+                get_fill_color="COLOR",
+                get_radius=800,
+                radius_min_pixels=4,
+                radius_max_pixels=12,
+                pickable=True,
+                auto_highlight=True,
+            )
+            layers.append(carriers_layer)
+            
+            # Highlight selected carrier
+            if selected_row is not None:
+                highlight_df = pd.DataFrame([{
+                    "LAT": selected_row["LAT"],
+                    "LON": selected_row["LON"],
+                    "CARRIER_NAME": selected_row["CARRIER_NAME"],
+                }])
+                highlight_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=highlight_df,
+                    get_position=["LON", "LAT"],
+                    get_fill_color=[255, 215, 0, 255],
+                    get_radius=2000,
+                    radius_min_pixels=8,
+                    radius_max_pixels=20,
+                    pickable=False,
+                )
+                layers.append(highlight_layer)
+            
+            tooltip_html = "<b>{CARRIER_NAME}</b><br/>Equipment: {EQUIPMENT}<br/>Fleet: {FLEET_SIZE}<br/>Status: {STATUS}"
 
-    load_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=loads_df,
-        get_position=["O_LON", "O_LAT"],
-        get_fill_color=[29, 181, 136, 140],
-        get_radius=15000,
-        pickable=True,
-    )
-
-    view = pdk.ViewState(latitude=32.5, longitude=-99.5, zoom=5.2, pitch=0)
-
-    deck = pdk.Deck(
-        layers=[carrier_layer, load_layer],
-        initial_view_state=view,
-        map_style="mapbox://styles/mapbox/dark-v11",
-        tooltip={
-            "html": "<b>{CARRIER_NAME}</b><br/>Equipment: {EQUIPMENT}<br/>Fleet: {FLEET_SIZE}",
-            "style": {
-                "backgroundColor": "#1e252f",
-                "color": "#bdc4d5",
-                "border": "1px solid #293246",
-                "border-radius": "8px",
-                "padding": "8px",
+        deck = pdk.Deck(
+            layers=layers,
+            initial_view_state=view,
+            map_style="dark_no_labels",
+            tooltip={
+                "html": tooltip_html,
+                "style": {
+                    "backgroundColor": "#1e252f",
+                    "color": "#bdc4d5",
+                    "border": "1px solid #293246",
+                    "border-radius": "8px",
+                    "padding": "8px",
+                },
             },
-        },
-    )
-    st.pydeck_chart(deck, use_container_width=True, height=520)
+        )
+        st.pydeck_chart(deck, use_container_width=True, height=520)
 
-    # Weather table
-    st.html('<div class="section-header">Weather conditions</div>')
-    st.dataframe(
-        filt_weather.sort_values("WEATHER_RISK_LEVEL", ascending=False),
-        use_container_width=True,
-        hide_index=True,
-        height=240,
-    )
+    # Weather alerts section
+    st.html('<div class="section-header">Weather alerts</div>')
+    high_risk_weather = weather_df[weather_df["WEATHER_RISK_LEVEL"] == "HIGH"]
+    if len(high_risk_weather) > 0:
+        alert_cols = st.columns(min(4, len(high_risk_weather)))
+        for i, (_, wx) in enumerate(high_risk_weather.head(4).iterrows()):
+            with alert_cols[i]:
+                st.html(f"""
+                <div class="neu-card-inset" style="border-left:3px solid var(--danger);">
+                    <div style="font-weight:600;color:var(--text-header);font-size:0.9rem;">{wx['CITY_NAME']}</div>
+                    <div style="font-size:0.8rem;color:var(--text-secondary);margin-top:4px;">
+                        {wx['AVG_TEMP_F']:.0f}°F · Wind {wx['MAX_WIND_MPH']:.0f} mph
+                    </div>
+                    <div style="font-size:0.75rem;color:var(--danger-light);margin-top:4px;">HIGH RISK</div>
+                </div>
+                """)
+    else:
+        st.success("No high-risk weather conditions currently.")
 
 
 # ===== TAB 2: Match Engine ===================================================
@@ -386,91 +820,166 @@ with tab_match:
         """)
 
     recs_df = load_recommendations()
-    driver_ids = sorted(recs_df["DRIVER_ID"].unique())
+    
+    # Initialize session state for selected load
+    if "selected_load" not in st.session_state:
+        st.session_state.selected_load = None
 
-    col_left, col_right = st.columns([1, 3])
-    with col_left:
-        st.html('<div class="section-header">Select driver</div>')
-        sel_driver = st.selectbox(
-            "Driver ID",
-            driver_ids,
-            label_visibility="collapsed",
-        )
+    # Header controls
+    ctrl_cols = st.columns([1, 1, 2])
+    with ctrl_cols[0]:
+        driver_ids = sorted(recs_df["DRIVER_ID"].unique())
+        sel_driver = st.selectbox("Select driver", driver_ids)
+    with ctrl_cols[1]:
+        min_score = st.slider("Min match score", 0.0, 1.0, 0.5, 0.05)
 
+    # Filter recommendations
     driver_recs = (
-        recs_df[recs_df["DRIVER_ID"] == sel_driver]
+        recs_df[(recs_df["DRIVER_ID"] == sel_driver) & (recs_df["RECOMMENDATION_SCORE"] >= min_score)]
         .sort_values("RECOMMENDATION_SCORE", ascending=False)
-        .head(6)
     )
-
-    with col_right:
-        st.html('<div class="section-header">Top load recommendations</div>')
 
     if driver_recs.empty:
-        st.info("No recommendations available for this driver.")
+        st.warning(f"No recommendations above {min_score:.0%} for driver {sel_driver}. Try lowering the threshold.")
     else:
-        rec_cols = st.columns(min(3, len(driver_recs)))
-        for idx, (_, rec) in enumerate(driver_recs.iterrows()):
-            col = rec_cols[idx % 3]
-            score = rec["RECOMMENDATION_SCORE"]
-            sc = match_color(score)
-            fraud = rec.get("FRAUD_RISK_LEVEL", "LOW")
-            badge = risk_badge(fraud)
-
-            card_html = f"""
-            <div class="neu-card">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                    <div class="match-gauge" style="border:3px solid {sc};color:{sc};">
+        # Two-column layout: cards on left, detail panel on right
+        cards_col, detail_col = st.columns([2, 1])
+        
+        with cards_col:
+            st.html(f'<div class="section-header">{len(driver_recs)} matching loads</div>')
+            
+            # Create clickable cards using buttons
+            for idx, (_, rec) in enumerate(driver_recs.head(8).iterrows()):
+                score = rec["RECOMMENDATION_SCORE"]
+                sc = match_color(score)
+                fraud = rec.get("FRAUD_RISK_LEVEL", "LOW")
+                
+                col1, col2, col3, col4, col5 = st.columns([1, 2, 2, 1, 1])
+                
+                with col1:
+                    st.html(f"""
+                    <div class="match-gauge" style="border:3px solid {sc};color:{sc};margin:4px 0;">
                         {score*100:.0f}%
                     </div>
-                    <div style="text-align:right;">
-                        <div style="font-size:0.75rem;color:var(--text-secondary);">LOAD</div>
-                        <div style="font-weight:600;color:var(--text-header);font-size:0.95rem;">{rec['LOAD_ID']}</div>
+                    """)
+                with col2:
+                    st.markdown(f"**{rec['LOAD_ID']}**")
+                    st.caption(f"{rec['ORIGIN_CITY']} → {rec['DESTINATION_CITY']}")
+                with col3:
+                    st.markdown(f"**${rec['TOTAL_RATE']:,.0f}**")
+                    st.caption(f"{rec.get('MILES', 'N/A')} miles")
+                with col4:
+                    st.caption(rec['BROKER_NAME'][:15])
+                    fraud_colors = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}
+                    st.caption(fraud_colors.get(fraud, "⚪"))
+                with col5:
+                    if st.button("Select", key=f"sel_{rec['LOAD_ID']}"):
+                        st.session_state.selected_load = rec.to_dict()
+                        st.rerun()
+                
+                st.divider()
+        
+        with detail_col:
+            st.html('<div class="section-header">Load details</div>')
+            
+            if st.session_state.selected_load:
+                load = st.session_state.selected_load
+                score = load["RECOMMENDATION_SCORE"]
+                sc = match_color(score)
+                
+                st.html(f"""
+                <div class="neu-card">
+                    <div style="text-align:center;margin-bottom:16px;">
+                        <div class="match-gauge" style="border:4px solid {sc};color:{sc};width:70px;height:70px;font-size:1.3rem;margin:0 auto;">
+                            {score*100:.0f}%
+                        </div>
+                        <div style="margin-top:8px;font-size:0.8rem;color:var(--text-secondary);">Match score</div>
+                    </div>
+                    <div style="font-weight:700;color:var(--text-header);font-size:1.1rem;text-align:center;">
+                        {load['LOAD_ID']}
                     </div>
                 </div>
-                <div style="font-size:0.85rem;color:var(--text-primary);margin-bottom:8px;">
-                    {rec['ORIGIN_CITY']}, {rec['ORIGIN_STATE']}
-                    &rarr; {rec['DESTINATION_CITY']}, {rec['DESTINATION_STATE']}
+                """)
+                
+                st.html(f"""
+                <div class="neu-card-inset" style="margin-top:12px;">
+                    <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:4px;">ROUTE</div>
+                    <div style="color:var(--text-primary);font-size:0.9rem;">
+                        {load['ORIGIN_CITY']}, {load['ORIGIN_STATE']}<br/>
+                        ↓<br/>
+                        {load['DESTINATION_CITY']}, {load['DESTINATION_STATE']}
+                    </div>
+                    <div style="margin-top:8px;color:var(--text-secondary);font-size:0.85rem;">
+                        {load.get('MILES', 'N/A')} miles
+                    </div>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                    <span style="font-weight:600;color:var(--success);font-size:1.1rem;">${rec['TOTAL_RATE']:,.0f}</span>
-                    <span style="font-size:0.8rem;color:var(--text-secondary);">{rec.get('MILES', 'N/A')} mi</span>
+                """)
+                
+                st.html(f"""
+                <div class="neu-card-inset" style="margin-top:12px;">
+                    <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:4px;">COMPENSATION</div>
+                    <div style="color:var(--success);font-weight:700;font-size:1.3rem;">${load['TOTAL_RATE']:,.0f}</div>
+                    <div style="color:var(--text-secondary);font-size:0.85rem;margin-top:4px;">
+                        ${load['TOTAL_RATE']/max(load.get('MILES', 1), 1):,.2f}/mile
+                    </div>
                 </div>
-                <div style="display:flex;justify-content:space-between;align-items:center;">
-                    <span style="font-size:0.8rem;color:var(--text-secondary);">{rec['BROKER_NAME']}</span>
-                    {badge}
+                """)
+                
+                fraud = load.get("FRAUD_RISK_LEVEL", "LOW")
+                fraud_color = {"LOW": "var(--success)", "MEDIUM": "var(--warning)", "HIGH": "var(--danger)"}.get(fraud, "var(--text-secondary)")
+                st.html(f"""
+                <div class="neu-card-inset" style="margin-top:12px;">
+                    <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:4px;">BROKER</div>
+                    <div style="color:var(--text-header);font-weight:600;">{load['BROKER_NAME']}</div>
+                    <div style="display:flex;justify-content:space-between;margin-top:8px;">
+                        <span style="font-size:0.8rem;color:var(--text-secondary);">Credit: {load.get('CREDIT_SCORE', 'N/A')}</span>
+                        <span style="font-size:0.8rem;color:{fraud_color};">{fraud} risk</span>
+                    </div>
                 </div>
-            </div>
-            """
-            with col:
-                st.html(card_html)
-
-            # Show second row if more than 3
-            if idx == 2 and len(driver_recs) > 3:
-                rec_cols = st.columns(min(3, len(driver_recs) - 3))
-
-    # Recommendation distribution
-    st.html('<div class="section-header">Score distribution</div>')
-    fig = go.Figure()
-    fig.add_trace(
-        go.Histogram(
-            x=recs_df["RECOMMENDATION_SCORE"],
-            nbinsx=20,
-            marker_color="#1a6ce7",
-            marker_line_color="#5999f8",
-            marker_line_width=1,
-        )
-    )
-    fig.update_layout(
-        plot_bgcolor="#1e252f",
-        paper_bgcolor="#191e24",
-        font=dict(color="#9fabc1", family="Inter"),
-        xaxis=dict(title="Match score", gridcolor="#293246", zerolinecolor="#293246"),
-        yaxis=dict(title="Count", gridcolor="#293246", zerolinecolor="#293246"),
-        margin=dict(l=40, r=20, t=20, b=40),
-        height=280,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+                """)
+                
+                # Live ML Scoring
+                st.markdown("---")
+                if st.button("🧠 Get Live ML Score", use_container_width=True):
+                    with st.spinner("Running ML inference..."):
+                        # Extract numeric load ID
+                        load_id_num = int(''.join(filter(str.isdigit, str(load['LOAD_ID']))) or '0')
+                        live_score_df = run_query(f"""
+                            SELECT APEX_CAPITAL_DEMO.ML.GET_RECOMMENDATION_SCORE(
+                                {sel_driver}, {load_id_num}
+                            ) AS LIVE_SCORE
+                        """)
+                        if len(live_score_df) > 0:
+                            live_score = float(live_score_df.iloc[0]["LIVE_SCORE"])
+                            live_sc = match_color(live_score)
+                            st.html(f"""
+                            <div class="neu-card" style="text-align:center;margin-top:8px;border:2px solid {live_sc};">
+                                <div style="font-size:0.75rem;color:var(--text-secondary);margin-bottom:4px;">REAL-TIME ML SCORE</div>
+                                <div style="color:{live_sc};font-weight:700;font-size:1.5rem;">{live_score*100:.1f}%</div>
+                                <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:4px;">
+                                    via GET_RECOMMENDATION_SCORE UDF
+                                </div>
+                            </div>
+                            """)
+                
+                # Action buttons
+                act_col1, act_col2 = st.columns(2)
+                with act_col1:
+                    if st.button("✓ Accept load", use_container_width=True, type="primary"):
+                        st.success(f"Load {load['LOAD_ID']} accepted!")
+                with act_col2:
+                    if st.button("✗ Decline", use_container_width=True):
+                        st.session_state.selected_load = None
+                        st.rerun()
+            else:
+                st.html("""
+                <div class="neu-card-inset" style="text-align:center;padding:40px 20px;">
+                    <div style="font-size:2rem;margin-bottom:12px;">📦</div>
+                    <div style="color:var(--text-secondary);font-size:0.9rem;">
+                        Select a load from the list to view details
+                    </div>
+                </div>
+                """)
 
 
 # ===== TAB 3: Broker 360 Inspector ==========================================
@@ -585,6 +1094,8 @@ with tab_broker:
     with wx_col:
         st.html('<div class="section-header">Current conditions</div>')
         wx_risk = broker.get("CURRENT_WEATHER_RISK", "N/A")
+        if wx_risk is None or str(wx_risk).upper() in ("NONE", "NAN", ""):
+            wx_risk = "N/A"
         wx_badge = risk_badge(wx_risk)
         st.html(
             f'<div class="neu-card-inset">'
@@ -602,8 +1113,13 @@ with tab_broker:
             st.session_state.agent_messages = []
 
         for msg in st.session_state.agent_messages:
-            with st.chat_message(msg["role"]):
-                st.write(msg["content"])
+            avatar = "👤" if msg["role"] == "user" else "🤖"
+            with st.chat_message(msg["role"], avatar=avatar):
+                # Show thinking in expander for assistant messages (if available)
+                if msg["role"] == "assistant" and msg.get("thinking"):
+                    with st.expander("🧠 View agent reasoning", expanded=False):
+                        st.html(msg["thinking"])
+                st.markdown(msg["content"])
 
         if prompt := st.chat_input(
             f"Ask about {sel_broker}...", key="broker_chat"
@@ -611,14 +1127,57 @@ with tab_broker:
             st.session_state.agent_messages.append(
                 {"role": "user", "content": prompt}
             )
-            with st.chat_message("user"):
-                st.write(prompt)
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(prompt)
 
-            with st.chat_message("assistant"):
-                with st.spinner("Querying agent..."):
-                    answer = call_cortex_agent(prompt)
-                st.write(answer)
+            with st.chat_message("assistant", avatar="🤖"):
+                # Create expander immediately - visible from start
+                expander_container = st.container()
+                response_placeholder = st.empty()
+                
+                # Structured steps for visual display
+                steps = {
+                    "planning": [],
+                    "tools": [],
+                    "reasoning": ""
+                }
+                full_response = ""
+                
+                # Create expander and placeholder INSIDE it for dynamic updates
+                with expander_container:
+                    expander = st.expander("🧠 Agent reasoning", expanded=True)
+                    with expander:
+                        thinking_placeholder = st.empty()
+                        thinking_placeholder.html('<div class="thinking-section"><em>⏳ Starting...</em></div>')
+                
+                for mode, text in call_cortex_agent_streaming(prompt, broker_context=sel_broker):
+                    if mode == "status":
+                        # Categorize and store the status message
+                        category = categorize_status(text)
+                        if category == "planning":
+                            if text not in steps["planning"]:
+                                steps["planning"].append(text)
+                        else:  # tool
+                            if text not in steps["tools"]:
+                                steps["tools"].append(text)
+                        # Update display with structured HTML
+                        thinking_placeholder.html(render_thinking_html(steps))
+                    elif mode == "thinking":
+                        # Thinking text is already accumulated, just keep latest
+                        steps["reasoning"] = text
+                        # Update display with structured HTML (includes reasoning)
+                        thinking_placeholder.html(render_thinking_html(steps))
+                    else:  # mode == "answer"
+                        full_response = text
+                        response_placeholder.markdown(full_response + " ▌")
+                
+                # Final render: update expander with complete content
+                thinking_placeholder.html(render_thinking_html(steps))
+                response_placeholder.markdown(full_response)
+                
+                # Store structured thinking for history display
+                thinking_text = render_thinking_html(steps)
 
             st.session_state.agent_messages.append(
-                {"role": "assistant", "content": answer}
+                {"role": "assistant", "content": full_response, "thinking": thinking_text}
             )

@@ -184,3 +184,65 @@ Format follows the Ralph Loop pattern: state on disk, git as cumulative memory.
   - 1 deploy.sh reference to non-existent file
 - **Key lesson:** `snowflake_sql_execute` tool connects to SNOWHOUSE account, not `se_demo`. All live queries must use `snow sql -c se_demo` via Bash.
 ---
+
+## Run 4 — Streamlit Visual/Data Debug (2026-02-23)
+
+### Overview
+- **Version:** 5
+- **New checks added:** data_geocode_validity, streamlit_ui_polish, streamlit_data_display (22 total)
+- **Max iterations:** 30
+- **Bugs discovered and fixed:** 9
+
+### Background
+User reported visual bugs in deployed Streamlit app after Run 3 convergence:
+- Map showed grid pattern instead of city-clustered points
+- Broken material icon showing as "keyboard_double"
+- Weather table sorted alphabetically not by severity
+- City/state duplicated in Match Engine cards ("Dallas, TX, TX")
+
+Used 3 background subagents (Map data analyzer, UI issues analyzer, Other tabs analyzer) to diagnose issues in parallel before fixing.
+
+### Iteration 20 — data_geocode_validity (NEW)
+- **Status before:** FAIL (critical=1, synthetic data had uniform lat/lon distribution)
+- **Actions taken:**
+  1. Created `APEX_CAPITAL_DEMO.RAW.CITY_GEOCODES` lookup table with 15 cities
+  2. Updated `CARRIER_PROFILES` coordinates from uniform grid to city-geocoded with ±0.04° jitter
+  3. Updated `LOAD_POSTINGS` coordinates similarly
+- **Status after:** PASS (coordinates now cluster around actual cities)
+- **Files changed:** None (Snowflake data only)
+- **Lessons:** Synthetic data generators should use city lookup tables, not UNIFORM() for lat/lon
+
+### Iteration 21 — streamlit_ui_polish (NEW)
+- **Status before:** FAIL (warning=3)
+- **Actions taken:**
+  1. Line 20: `page_icon=":material/local_shipping:"` → `page_icon="🚛"` (emoji works reliably)
+  2. Line 256: `:material/match_case:` → `:material/handshake:` (better semantic match)
+  3. Lines 368-379: Added pd.Categorical for weather risk sort by severity (HIGH→MEDIUM→LOW)
+- **Status after:** PASS
+- **Files changed:** streamlit/streamlit_app.py
+- **Lessons:** Material icons unreliable in SiS; use emojis. Categorical dtype required for custom sort order.
+
+### Iteration 22 — streamlit_data_display (NEW)
+- **Status before:** FAIL (warning=2)
+- **Actions taken:**
+  1. Lines 439-442: Removed redundant state suffix (ORIGIN_CITY already includes state)
+  2. Lines 211-221: Updated risk_badge() to handle N/A/None with neutral gray styling
+  3. Line 110: Added `.risk-na` CSS class
+- **Status after:** PASS
+- **Files changed:** streamlit/streamlit_app.py
+- **Lessons:** When city field includes state (e.g., "Dallas, TX"), don't append state column again
+
+---
+
+## CONVERGENCE ACHIEVED (Run 4)
+- **Total iterations:** 22 of 30
+- **All 22 checks:** PASS
+- **Critical findings:** 0
+- **Warning findings:** 0
+- **Bugs discovered and fixed:** 9
+  - 3 data issues (CITY_GEOCODES lookup, CARRIER_PROFILES coords, LOAD_POSTINGS coords)
+  - 3 UI polish issues (page_icon, tab icon, weather sort)
+  - 3 data display issues (city/state duplication, risk_badge null handling, CSS class)
+- **New files created:** `.cortex/AGENTS.md` (agent architecture documentation)
+- **Key lesson:** Use background subagents in parallel for diagnosis, then fix sequentially in convergence loop
+---
