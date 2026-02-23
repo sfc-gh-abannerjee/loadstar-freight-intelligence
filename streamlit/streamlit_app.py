@@ -153,11 +153,52 @@ html, body, [class*="st-"] {
     content: "▶";
     margin-right: 8px;
     font-size: 0.8rem;
-    transition: transform 0.2s ease;
     display: inline-block;
+    transition: transform 0.3s ease;
 }
 [data-testid="stExpander"][open] summary::before {
-    content: "▼";
+    transform: rotate(90deg);
+}
+
+/* Nested SQL expander (HTML details/summary) */
+.sql-details {
+    border-left: 3px solid #9c5bea;
+    padding-left: 12px;
+    margin-bottom: 12px;
+}
+.sql-details summary {
+    font-size: 0.75rem;
+    color: #9c5bea;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.sql-details summary::-webkit-details-marker { display: none; }
+.sql-details summary::before {
+    content: "▶";
+    font-size: 0.6rem;
+    display: inline-block;
+    transition: transform 0.3s ease;
+}
+.sql-details[open] summary::before {
+    transform: rotate(90deg);
+}
+.sql-details pre {
+    background: #1a1d24;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin: 8px 0 0 0;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.sql-details code {
+    color: #e0e6ed;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
 }
 
 /* Agent thinking step cards */
@@ -275,6 +316,31 @@ def call_cortex_agent_streaming(question: str, broker_context: str = ""):
                 parsed = json.loads(event.data)
                 event_type = event.event or ""
                 
+                # Helper to find SQL in nested structures
+                def find_sql_in_data(data, depth=0):
+                    if depth > 5:  # Prevent infinite recursion
+                        return None
+                    if isinstance(data, str):
+                        stripped = data.strip()
+                        if stripped.upper().startswith(("SELECT ", "WITH ", "INSERT ", "UPDATE ")):
+                            return stripped
+                    elif isinstance(data, dict):
+                        # Check common SQL field names first
+                        for key in ("sql", "query", "statement", "generated_sql", "sql_query"):
+                            if key in data and data[key]:
+                                return data[key]
+                        # Recursively search values
+                        for v in data.values():
+                            result = find_sql_in_data(v, depth + 1)
+                            if result:
+                                return result
+                    elif isinstance(data, list):
+                        for item in data:
+                            result = find_sql_in_data(item, depth + 1)
+                            if result:
+                                return result
+                    return None
+                
                 # Status events (Planning, Executing tool, etc.)
                 if event_type == "response.status":
                     status = parsed.get("status", "")
@@ -282,6 +348,10 @@ def call_cortex_agent_streaming(question: str, broker_context: str = ""):
                     if message and message != last_status:
                         last_status = message
                         yield ("status", message)
+                    # Check if this status event contains SQL data
+                    sql = find_sql_in_data(parsed)
+                    if sql:
+                        yield ("sql", sql)
                 
                 # Thinking delta events (reasoning tokens)
                 elif event_type == "response.thinking.delta":
@@ -296,20 +366,22 @@ def call_cortex_agent_streaming(question: str, broker_context: str = ""):
                     if message and message != last_status:
                         last_status = message
                         yield ("status", message)
+                    # Check for SQL in status data
+                    sql = find_sql_in_data(parsed)
+                    if sql:
+                        yield ("sql", sql)
+                
+                # Tool use/call events (contains the SQL being sent to tool)
+                elif event_type in ("response.tool_use", "response.tool_call", "tool_use"):
+                    sql = find_sql_in_data(parsed)
+                    if sql:
+                        yield ("sql", sql)
                 
                 # Tool result (contains SQL queries and other tool outputs)
                 elif event_type == "response.tool_result":
-                    # Try to extract SQL from tool results
-                    tool_result = parsed.get("tool_result", parsed)
-                    if isinstance(tool_result, dict):
-                        # Check for SQL in various locations
-                        sql = tool_result.get("sql", "")
-                        if not sql:
-                            content = tool_result.get("content", "")
-                            if isinstance(content, str) and content.strip().upper().startswith(("SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP")):
-                                sql = content
-                        if sql:
-                            yield ("sql", sql.strip())
+                    sql = find_sql_in_data(parsed)
+                    if sql:
+                        yield ("sql", sql)
                 
                 # Text delta events (answer tokens)
                 elif event_type == "response.text.delta":
@@ -367,6 +439,12 @@ def call_cortex_agent_streaming(question: str, broker_context: str = ""):
                         answer_text += delta
                         yield ("answer", answer_text)
                 
+                # Catch-all: check any unhandled event for SQL
+                else:
+                    sql = find_sql_in_data(parsed)
+                    if sql:
+                        yield ("sql", sql)
+                
             except json.JSONDecodeError:
                 continue
             except Exception:
@@ -411,12 +489,12 @@ def render_thinking_html(steps: list, reasoning: str = "") -> str:
             </div>
             ''')
         elif category == "sql":
-            # SQL queries get a code block
+            # SQL queries in a collapsible details/summary element
             html_parts.append(f'''
-            <div class="step-item" style="border-left: 3px solid #9c5bea; padding-left: 12px; margin-bottom: 12px;">
-                <div style="font-size: 0.75rem; color: #9c5bea; font-weight: 600; margin-bottom: 6px;">📊 SQL Query</div>
-                <pre style="background: #1a1d24; border-radius: 6px; padding: 10px 12px; margin: 0; overflow-x: auto; font-size: 0.8rem; line-height: 1.4;"><code style="color: #e0e6ed; font-family: 'SF Mono', Monaco, Consolas, monospace;">{text}</code></pre>
-            </div>
+            <details class="sql-details">
+                <summary>📊 SQL Query</summary>
+                <pre><code>{text}</code></pre>
+            </details>
             ''')
         else:  # tool
             icon = "⚡"
@@ -429,13 +507,14 @@ def render_thinking_html(steps: list, reasoning: str = "") -> str:
     
     # Reasoning section at the end (if present)
     if reasoning:
-        # Truncate very long reasoning for display
-        if len(reasoning) > 800:
-            reasoning = reasoning[:800] + "..."
+        # Allow much longer reasoning display
+        display_reasoning = reasoning
+        if len(reasoning) > 3000:
+            display_reasoning = reasoning[:3000] + "..."
         html_parts.append(f'''
         <div class="thinking-section reasoning">
             <div class="section-label">🧠 Agent Reasoning</div>
-            <div class="reasoning-text">{reasoning}</div>
+            <div class="reasoning-text" style="white-space: pre-wrap;">{display_reasoning}</div>
         </div>
         ''')
     
