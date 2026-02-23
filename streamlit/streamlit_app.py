@@ -379,34 +379,31 @@ def categorize_status(message: str) -> str:
     return "planning"  # Default to planning for unknown status
 
 
-def render_thinking_html(steps: dict) -> str:
-    """Render thinking steps as styled HTML cards."""
+def render_thinking_html(steps: list, reasoning: str = "") -> str:
+    """Render thinking steps as a chronological timeline with styled items."""
     html_parts = []
     
-    # Planning section
-    if steps.get("planning"):
-        items = "".join(f'<div class="step-item"><span class="icon">✓</span>{s}</div>' for s in steps["planning"])
+    # Render steps in chronological order
+    for step in steps:
+        category = step.get("category", "planning")
+        text = step.get("text", "")
+        
+        if category == "planning":
+            icon = "✓"
+            color = "#1a6ce7"
+        else:  # tool
+            icon = "⚡"
+            color = "#e8a317"
+        
         html_parts.append(f'''
-        <div class="thinking-section planning">
-            <div class="section-label">📋 Planning</div>
-            {items}
+        <div class="step-item" style="border-left: 3px solid {color}; padding-left: 12px; margin-bottom: 8px;">
+            <span class="icon">{icon}</span> {text}
         </div>
         ''')
     
-    # Tools section
-    if steps.get("tools"):
-        items = "".join(f'<div class="step-item"><span class="icon">⚡</span>{s}</div>' for s in steps["tools"])
-        html_parts.append(f'''
-        <div class="thinking-section tools">
-            <div class="section-label">🔧 Tool Execution</div>
-            {items}
-        </div>
-        ''')
-    
-    # Reasoning section
-    if steps.get("reasoning"):
+    # Reasoning section at the end (if present)
+    if reasoning:
         # Truncate very long reasoning for display
-        reasoning = steps["reasoning"]
         if len(reasoning) > 800:
             reasoning = reasoning[:800] + "..."
         html_parts.append(f'''
@@ -416,7 +413,7 @@ def render_thinking_html(steps: dict) -> str:
         </div>
         ''')
     
-    return "".join(html_parts) if html_parts else '<div class="thinking-section"><em>Processing...</em></div>'
+    return "".join(html_parts) if html_parts else '<div class="thinking-section"><em>⏳ Processing...</em></div>'
 
 
 def call_cortex_agent(question: str, broker_context: str = "") -> str:
@@ -1135,12 +1132,9 @@ with tab_broker:
                 expander_container = st.container()
                 response_placeholder = st.empty()
                 
-                # Structured steps for visual display
-                steps = {
-                    "planning": [],
-                    "tools": [],
-                    "reasoning": ""
-                }
+                # Chronological list of steps (preserves order as they happen)
+                steps = []  # List of {"category": "planning"|"tool", "text": "..."}
+                reasoning = ""
                 full_response = ""
                 
                 # Create expander and placeholder INSIDE it for dynamic updates
@@ -1152,31 +1146,28 @@ with tab_broker:
                 
                 for mode, text in call_cortex_agent_streaming(prompt, broker_context=sel_broker):
                     if mode == "status":
-                        # Categorize and store the status message
+                        # Store step with category in chronological order
                         category = categorize_status(text)
-                        if category == "planning":
-                            if text not in steps["planning"]:
-                                steps["planning"].append(text)
-                        else:  # tool
-                            if text not in steps["tools"]:
-                                steps["tools"].append(text)
-                        # Update display with structured HTML
-                        thinking_placeholder.html(render_thinking_html(steps))
+                        # Only add if not a duplicate of the last step
+                        if not steps or steps[-1].get("text") != text:
+                            steps.append({"category": category, "text": text})
+                        # Update display with chronological timeline
+                        thinking_placeholder.html(render_thinking_html(steps, reasoning))
                     elif mode == "thinking":
                         # Thinking text is already accumulated, just keep latest
-                        steps["reasoning"] = text
-                        # Update display with structured HTML (includes reasoning)
-                        thinking_placeholder.html(render_thinking_html(steps))
+                        reasoning = text
+                        # Update display with chronological timeline (includes reasoning)
+                        thinking_placeholder.html(render_thinking_html(steps, reasoning))
                     else:  # mode == "answer"
                         full_response = text
                         response_placeholder.markdown(full_response + " ▌")
                 
                 # Final render: update expander with complete content
-                thinking_placeholder.html(render_thinking_html(steps))
+                thinking_placeholder.html(render_thinking_html(steps, reasoning))
                 response_placeholder.markdown(full_response)
                 
                 # Store structured thinking for history display
-                thinking_text = render_thinking_html(steps)
+                thinking_text = render_thinking_html(steps, reasoning)
 
             st.session_state.agent_messages.append(
                 {"role": "assistant", "content": full_response, "thinking": thinking_text}
