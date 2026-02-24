@@ -49,6 +49,7 @@ LoadStar demonstrates how Snowflake replaces fragmented legacy stacks (Oracle + 
 | 9 | **Zero-Copy Cloning** | DS sandbox at zero storage cost |
 | 10 | **H3 Geospatial** | Lane density via H3 cell indexing |
 | 11 | **Git Integration** | Source-controlled demo artifacts |
+| 12 | **OpenRouteService Native App** | Truck routing via SPCS (driving-hgv profile) |
 
 ## Quick Start
 

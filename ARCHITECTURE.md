@@ -118,3 +118,63 @@ External Source → INVOICE_TRANSACTIONS_JSON (VARIANT)
 
 SIMULATE_STREAMING_INGESTION task: 5 rows/minute
 ```
+
+## Command Map Routing Integration
+
+The LoadStar Commander Streamlit app includes a Command Map that displays load recommendations with **road-following routes** powered by OpenRouteService Native App.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Command Map Routing Pipeline                          │
+│                                                                          │
+│  ┌──────────────────┐     ┌─────────────────────┐     ┌──────────────┐  │
+│  │ LOADSTAR_        │     │ ROUTE_POLYLINES     │     │ Streamlit    │  │
+│  │ RECOMMENDATIONS_V│────▶│ (pre-computed)      │────▶│ PathLayer    │  │
+│  │ (origin/dest)    │     │                     │     │ (pydeck)     │  │
+│  └──────────────────┘     └─────────────────────┘     └──────────────┘  │
+│                                    │                                     │
+│                           ┌────────▼────────┐                           │
+│                           │ OpenRouteService│                           │
+│                           │ Native App      │                           │
+│                           │ (SPCS)          │                           │
+│                           │                 │                           │
+│                           │ DIRECTIONS()    │                           │
+│                           │ driving-hgv     │                           │
+│                           └─────────────────┘                           │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### ROUTE_POLYLINES Table
+
+Pre-computed road-following routes for cross-country freight lanes:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| ROUTE_KEY | VARCHAR | "Origin, ST -> Dest, ST" |
+| ORIGIN_CITY | VARCHAR | Origin city with state |
+| DEST_CITY | VARCHAR | Destination city with state |
+| COORDINATES | ARRAY | `[[lon, lat], ...]` polyline |
+| DISTANCE_KM | NUMBER | Route distance in kilometers |
+
+**Routes covered:**
+- Amarillo, TX → Indianapolis, IN (1,770 km)
+- Amarillo, TX → New York, NY (2,850 km)
+- Dallas, TX → Boston, MA (2,950 km)
+- San Antonio, TX → Indianapolis, IN (1,850 km)
+- Tulsa, OK → Los Angeles, CA (2,480 km)
+
+### Live ORS Integration
+
+The app includes a **Live ORS demo** toggle that calls `OPENROUTESERVICE_NATIVE_APP.CORE.DIRECTIONS()` in real-time for a Texas-local route (Dallas → Amarillo, 590 km):
+
+```sql
+SELECT OPENROUTESERVICE_NATIVE_APP.CORE.DIRECTIONS(
+    'driving-hgv',           -- Heavy goods vehicle profile
+    [-96.764, 32.751],       -- Dallas coordinates
+    [-101.837, 35.231]       -- Amarillo coordinates
+) AS route_json;
+```
+
+Returns GeoJSON with 3,233 coordinate points following actual highways (I-40, US-287).

@@ -88,6 +88,30 @@ Test questions:
 
 ---
 
+## Phase 6: Command Map & Route Planning
+
+**Target persona: Operations / Product**
+
+> "Open the LoadStar Commander app. This is the Command Map — a visual dispatch console for driver-load matching."
+
+> "Notice the routes aren't straight lines. They follow actual roads. That's OpenRouteService Native App running inside Snowflake on Container Services."
+
+Demo the ORS toggle:
+
+> "Watch this — I'll toggle on the live demo route."
+
+*Enable the "Live ORS demo route" toggle*
+
+> "That orange route you see? It just called the ORS DIRECTIONS function in real-time. Dallas to Amarillo, 590 kilometers, following I-40 and US-287. The driving-hgv profile optimizes for truck routing — considers bridge heights, weight limits, truck stops."
+
+> "The cross-country routes are pre-computed because they go outside Texas, but the architecture is the same. ORS generates the polylines, we store them, and pydeck renders them as smooth curves on the map."
+
+Show the ORS attribution badge:
+
+> "See the badge in the control panel? OpenRouteService Native App, Snowpark Container Services, driving-hgv profile. This is enterprise routing running entirely inside your Snowflake account. No external API calls. No egress charges. Full data sovereignty."
+
+---
+
 ## Closing
 
 > "Let's recap: One platform. Streaming ingestion without touching Oracle. A golden record that auto-refreshes. GPU-trained ML models without Docker. Natural language queries without SQL. PII masked by policy, not by trust. All deployed from a single git repo in under 30 minutes."

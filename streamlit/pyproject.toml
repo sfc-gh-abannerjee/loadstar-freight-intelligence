@@ -4,8 +4,8 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "streamlit[snowflake]>=1.52.0",
-    "pydeck>=0.9.0",
     "plotly>=5.0.0",
     "requests>=2.28.0",
     "sseclient-py>=1.8.0",
+    "pydeck>=0.9.0",
 ]
